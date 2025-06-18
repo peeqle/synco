@@ -10,12 +10,11 @@ use std::net::SocketAddr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
 use std::{fs, io};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::Receiver;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 const DEFAULT_APP_SUBDIR: &str = "synco";
@@ -92,7 +91,7 @@ impl ChallengeManager {
 
     pub async fn cleanup(_challenges: ChallengedDevices) {
         loop {
-            sleep(Duration::from_secs(Self::CLEANUP_DELAY));
+            sleep(Duration::from_secs(Self::CLEANUP_DELAY)).await;
 
             let mut ch_locked = _challenges.lock().await;
             let now = Instant::now();

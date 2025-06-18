@@ -6,12 +6,11 @@ use std::cmp::PartialEq;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
-use tokio::time::Instant;
+use tokio::time::{sleep, Instant};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveryMessage {
@@ -157,7 +156,7 @@ pub async fn start_broadcast_announcer(
         socket
             .send_to(serialized_message.as_bytes(), broadcast_addr)
             .await?;
-        sleep(Duration::from_secs(BROADCAST_INTERVAL_SECONDS));
+        sleep(Duration::from_secs(BROADCAST_INTERVAL_SECONDS)).await;
     }
 }
 
