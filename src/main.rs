@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::connection::ChallengeManager;
 use crate::device_manager::DeviceManager;
-use crate::keychain::clear_keys;
 use local_ip_address::list_afinet_netifas;
 use tokio::time::sleep;
 
