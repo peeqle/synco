@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveryMessage {
@@ -88,7 +88,7 @@ pub async fn start_listener(
     println!("Broadcast listener started on {}", listen_addr);
 
     let mut buf = vec![0u8; 1024];
-    
+
     let device_manager = device_manager_arc.lock().await;
     let devices_tx = &device_manager.discovery_tx;
 

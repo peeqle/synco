@@ -1,12 +1,12 @@
 use base32::Alphabet;
-use base64::Engine as _;
-use ed25519_dalek::{SecretKey, Signature, Signer, SigningKey};
+use der::pem::LineEnding;
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use error::Error;
 use lazy_static::lazy_static;
-use pkcs8::{AlgorithmIdentifier, PrivateKeyInfo};
+use pkcs8::ObjectIdentifier;
 use rand::rngs::OsRng;
-use rcgen::DnType::{CommonName, OrganizationName};
-use rcgen::{CertificateParams, DistinguishedName, DnValue, Ia5String, KeyPair, SanType};
+use rcgen::{CertificateParams, DistinguishedName, DnType, DnValue, KeyPair, PKCS_ED25519};
 use rustls::pki_types::CertificateDer;
 use rustls_pemfile::certs;
 use std::fs::{File, OpenOptions};
@@ -14,12 +14,13 @@ use std::io::{BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{error, fs, io};
-use pkcs8::der::Encode;
 
 const DEFAULT_APP_SUBDIR: &str = "synco";
 const PRIVATE_KEY_FILE_NAME: &str = "key.pem";
 const CERT_FILE_NAME: &str = "cert.pem";
 const SIGNING_KEY: &str = "signing_key.bin";
+
+const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 
 lazy_static! {
     pub static ref DEVICE_SIGNING_KEY: Arc<SigningKey> = {
@@ -84,6 +85,44 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
     Ok(())
 }
 
+pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
+    let params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
+    let device_id = device_id().expect("Cannot extract device_id");
+
+    let mut cert_name = DistinguishedName::new();
+    cert_name.push(DnType::OrganizationName, device_id);
+    cert_name.push(
+        DnType::CommonName,
+        DnValue::PrintableString("synco".try_into().unwrap()),
+    );
+
+    let keypair = generate_keypair()?;
+
+    let cert = params.self_signed(&keypair)?;
+    let private_key_pem = keypair.serialize_pem();
+    let cert_pem = cert.pem();
+
+    let app_data_dir = get_default_application_dir();
+
+    let key_file_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
+    let cert_file_path = app_data_dir.join(CERT_FILE_NAME);
+
+    fs::write(&key_file_path, private_key_pem.as_bytes())?;
+    fs::write(&cert_file_path, cert_pem.as_bytes())?;
+
+    Ok(())
+}
+
+pub fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
+    let current_key = Arc::clone(&DEVICE_SIGNING_KEY);
+    let pkcs8_pem = current_key.to_pkcs8_pem(LineEnding::LF)?;
+
+    let rcgen_key_pair = KeyPair::from_pem_and_sign_algo(&pkcs8_pem, &PKCS_ED25519)
+        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+
+    Ok(rcgen_key_pair)
+}
+
 pub(crate) fn load_private_key_arc() -> io::Result<Arc<KeyPair>> {
     let private_key = load_private_key(false)?;
     Ok(Arc::new(private_key))
@@ -95,7 +134,7 @@ pub(crate) fn load_certs_arc() -> io::Result<Arc<Vec<CertificateDer<'static>>>> 
 }
 
 fn load_certs(called_within: bool) -> io::Result<Vec<CertificateDer<'static>>> {
-    let mut app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir();
     let cert_path = app_data_dir.join(CERT_FILE_NAME);
 
     let file = OpenOptions::new().read(true).open(cert_path);
@@ -111,10 +150,8 @@ fn load_certs(called_within: bool) -> io::Result<Vec<CertificateDer<'static>>> {
                 if called_within {
                     return Err(err);
                 }
-                println!("File is not found - creating...");
-                let signing_key = Arc::clone(&DEVICE_SIGNING_KEY);
-                create_and_save_tls_keys_from_signing_key(signing_key.to_bytes())
-                    .expect("Cannot create TLS key");
+                println!("Creating certificates...");
+                generate_cert_keys().unwrap();
                 load_certs(true)
             }
             ErrorKind::PermissionDenied => {
@@ -129,7 +166,7 @@ fn load_certs(called_within: bool) -> io::Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
-    let mut app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir();
     let key_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
 
     let file = OpenOptions::new().read(true).open(&key_path);
@@ -157,10 +194,8 @@ fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
                 if called_within {
                     return Err(err);
                 }
-                println!("File is not found - creating...");
-                let signing_key = Arc::clone(&DEVICE_SIGNING_KEY);
-                create_and_save_tls_keys_from_signing_key(signing_key.to_bytes())
-                    .expect("Cannot create TLS key");
+                println!("Creating certificates...");
+                generate_cert_keys().unwrap();
                 load_private_key(true)
             }
             ErrorKind::PermissionDenied => {
@@ -172,78 +207,6 @@ fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
             _ => Err(err),
         },
     }
-}
-
-pub fn create_and_save_tls_keys_from_signing_key(
-    secret_key: SecretKey,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = get_default_application_dir();
-    fs::create_dir_all(&dir)?;
-
-    println!("Generating new self-signed TLS certificate using existing signing key...");
-
-    let mut params = CertificateParams::new(vec!["127.0.0.1".to_string()])
-        .expect("Cannot generate Certificate params.");
-
-    let current_device_id = device_id().expect("Failed to get device ID for certificate");
-
-    let mut distinguished_name = DistinguishedName::new();
-    distinguished_name.push(CommonName, DnValue::Utf8String(current_device_id.clone()));
-    distinguished_name.push(OrganizationName, DnValue::Utf8String("synco".to_string()));
-    params.distinguished_name = distinguished_name;
-
-    params.subject_alt_names.push(SanType::DnsName(
-        Ia5String::try_from(current_device_id.clone())
-            .expect(format!("Cannot parse Ia5String from {:?}", current_device_id).as_str()),
-    ));
-
-    let rcgen_key_pair = KeyPair::tr(secret_key.as_ref()).map_err(|e| {
-        io::Error::new(
-            ErrorKind::Other,
-            format!("Failed to create rcgen KeyPair from SigningKey: {}", e),
-        )
-    })?;
-    
-    let private_key_info = PrivateKeyInfo::new(AlgorithmIdentifier {
-        oid: spki::ObjectIdentifier::new_unwrap("1.3.101.112"),
-        parameters: None,
-    }, secret_key.as_ref());
-
-    let pkcs8_der = private_key_info.to_vec()
-        .map_err(|e| {
-            io::Error::new(
-                ErrorKind::Other,
-                format!("Failed to serialize SecretKey to PKCS#8 DER: {}", e),
-            )
-        })?;
-
-
-    let cert = params.self_signed(&rcgen_key_pair).map_err(|e| {
-        io::Error::new(
-            ErrorKind::Other,
-            format!("Failed to generate self-signed certificate: {}", e),
-        )
-    })?;
-
-    let cert_pem = cert.pem();
-    let key_pem = rcgen_key_pair.serialize_pem();
-
-    let cert_path = dir.as_path().join(CERT_FILE_NAME);
-    let key_path = dir.join(PRIVATE_KEY_FILE_NAME);
-
-    if cert_path.exists() {
-        fs::remove_file(&cert_path)?;
-    }
-    if key_path.exists() {
-        fs::remove_file(&key_path)?;
-    }
-
-    fs::write(&cert_path, cert_pem.as_bytes())?;
-    println!("Certificate saved to: {}", cert_path.display());
-
-    fs::write(&key_path, key_pem.as_bytes())?;
-    println!("Private key saved to: {}", key_path.display());
-    Ok(())
 }
 
 fn try_create_if_absent(path: &Path) {
