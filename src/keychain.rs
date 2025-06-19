@@ -1,3 +1,4 @@
+use crate::utils::get_default_application_dir;
 use base32::Alphabet;
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -6,16 +7,15 @@ use error::Error;
 use lazy_static::lazy_static;
 use pkcs8::ObjectIdentifier;
 use rand::rngs::OsRng;
-use rcgen::{CertificateParams, DistinguishedName, DnType, DnValue, KeyPair, PKCS_ED25519};
-use rustls::pki_types::CertificateDer;
-use rustls_pemfile::certs;
+use rcgen::BasicConstraints::Unconstrained;
+use rcgen::{
+    Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa, KeyPair, PKCS_ED25519,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{error, fs, io};
 
-const DEFAULT_APP_SUBDIR: &str = "synco";
 const PRIVATE_KEY_FILE_NAME: &str = "key.pem";
 const CERT_FILE_NAME: &str = "cert.pem";
 const SIGNING_KEY: &str = "signing_key.bin";
@@ -86,7 +86,8 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
 }
 
 pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
-    let params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
+    let mut params =
+        CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
     let device_id = device_id().expect("Cannot extract device_id");
 
     let mut cert_name = DistinguishedName::new();
@@ -95,6 +96,8 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
         DnType::CommonName,
         DnValue::PrintableString("synco".try_into().unwrap()),
     );
+    //marks the CA as signer
+    params.is_ca = IsCa::Ca(Unconstrained);
 
     let keypair = generate_keypair()?;
 
@@ -128,12 +131,12 @@ pub(crate) fn load_private_key_arc() -> io::Result<Arc<KeyPair>> {
     Ok(Arc::new(private_key))
 }
 
-pub(crate) fn load_certs_arc() -> io::Result<Arc<Vec<CertificateDer<'static>>>> {
-    let certs = load_certs(false)?;
+pub(crate) fn load_cert_arc() -> io::Result<Arc<Certificate>> {
+    let certs = load_cert(false)?;
     Ok(Arc::new(certs))
 }
 
-fn load_certs(called_within: bool) -> io::Result<Vec<CertificateDer<'static>>> {
+fn load_cert(called_within: bool) -> io::Result<Certificate> {
     let app_data_dir = get_default_application_dir();
     let cert_path = app_data_dir.join(CERT_FILE_NAME);
 
@@ -141,9 +144,13 @@ fn load_certs(called_within: bool) -> io::Result<Vec<CertificateDer<'static>>> {
     match file {
         Ok(_) => {
             let mut reader = BufReader::new(file?);
+            let mut holder: String = String::new();
+            reader.read_to_string(&mut holder)?;
 
-            let cert_iter = certs(&mut reader);
-            Ok(cert_iter.filter_map(|r| r.ok()).collect())
+            let cert_iter = CertificateParams::from_ca_cert_pem(&holder).unwrap();
+            let loaded_kp = load_private_key_arc()?;
+
+            Ok(cert_iter.self_signed(&loaded_kp).unwrap())
         }
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {
@@ -152,7 +159,7 @@ fn load_certs(called_within: bool) -> io::Result<Vec<CertificateDer<'static>>> {
                 }
                 println!("Creating certificates...");
                 generate_cert_keys().unwrap();
-                load_certs(true)
+                load_cert(true)
             }
             ErrorKind::PermissionDenied => {
                 eprintln!(
@@ -209,44 +216,6 @@ fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
     }
 }
 
-fn try_create_if_absent(path: &Path) {
-    match fs::exists(path) {
-        Ok(res) => {
-            if !res {
-                println!("[CONNECTION] Created file at {}", path.display());
-                File::create_new(path).unwrap();
-            }
-        }
-        Err(_) => {}
-    }
-}
-
-fn get_default_application_dir() -> PathBuf {
-    let mut app_data_dir = dirs::data_dir()
-        .ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::Unsupported,
-                "Could not determine application data directory for this OS.",
-            )
-        })
-        .unwrap();
-    app_data_dir.push(DEFAULT_APP_SUBDIR);
-
-    if !fs::exists(&app_data_dir).unwrap() {
-        fs::create_dir_all(app_data_dir.clone())
-            .map_err(|e| {
-                rustls::Error::General(format!(
-                    "Failed to create directories at {}, {}",
-                    app_data_dir.clone().display(),
-                    e
-                ))
-            })
-            .unwrap();
-    }
-
-    app_data_dir
-}
-
 pub fn device_id() -> Option<String> {
     let cp = Arc::clone(&DEVICE_SIGNING_KEY);
 
@@ -263,32 +232,29 @@ pub fn device_id() -> Option<String> {
     Some(device_id)
 }
 
-pub fn clear_keys() -> io::Result<()> {
-    println!("Clearing keystore...");
-    let dir = get_default_application_dir();
-    fs::remove_dir_all(dir)
-}
-
 mod keychain_test {
-    use crate::keychain::{load_certs, load_private_key};
+    use crate::keychain::*;
 
     #[test]
-    fn load_certs_TEST() {
-        let res = load_certs(false);
+    fn load_certs_test() {
+        let res = load_cert(false);
         if res.is_err() {
             panic!("[CONNECTION] Cannot extract CERT, {}", res.err().unwrap());
         }
 
-        assert_eq!(1, res.unwrap().iter().count());
+        assert_eq!(true, res.is_ok() && !res.unwrap().pem().is_empty());
     }
 
     #[test]
-    fn load_pk_TEST() {
+    fn load_pk_test() {
         let res = load_private_key(false);
         if res.is_err() {
             panic!("[CONNECTION] Cannot extract PK, {}", res.err().unwrap());
         }
 
-        assert_eq!(false, res.is_err());
+        assert_eq!(
+            true,
+            res.is_ok() && !res.unwrap().serialize_pem().is_empty()
+        );
     }
 }

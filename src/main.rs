@@ -18,6 +18,8 @@ mod device_manager;
 mod diff;
 mod keychain;
 mod server;
+mod client;
+mod utils;
 
 type NetError = Box<dyn Error + Send + Sync>;
 
@@ -31,9 +33,7 @@ lazy_static! {
 #[tokio::main]
 async fn main() -> Result<(), NetError> {
     color_eyre::install()?;
-
-    #[cfg(dev)]
-    clear_keys().unwrap();
+    
     let device_id = keychain::device_id().unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let my_listening_port: u16 = 22000;

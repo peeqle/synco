@@ -67,7 +67,6 @@ impl ChallengeManager {
 
         let challenges = Arc::clone(&self.current_challenges);
         loop {
-            let key = Arc::clone(&private_key_arc);
             tokio::select! {
                 Some((device_id, socket)) = self._ch_rx.recv() => {
                     let ch_  = challenges.lock().await;
@@ -88,7 +87,7 @@ impl ChallengeManager {
             let mut ch_locked = _challenges.lock().await;
             let now = Instant::now();
 
-            ch_locked.retain(|addr, (_socket_addr, _nonce, ttl)| {
+            ch_locked.retain(|_, (_socket_addr, _nonce, ttl)| {
                 if now.duration_since(*ttl).as_secs() > Self::CHALLENGE_DEATH {
                     return false;
                 }
