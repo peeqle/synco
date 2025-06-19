@@ -79,7 +79,7 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 // If hashes match, Device B authenticates Device A.
 
 pub async fn start_listener(
-    device_manager: &DeviceManager,
+    device_manager_arc: Arc<Mutex<DeviceManager>>,
     sender_id: String,
     challenges_sender: Sender<(String, SocketAddr)>,
 ) -> Result<(), NetError> {
@@ -89,6 +89,7 @@ pub async fn start_listener(
 
     let mut buf = vec![0u8; 1024];
     
+    let device_manager = device_manager_arc.lock().await;
     let devices_tx = &device_manager.discovery_tx;
 
     loop {
