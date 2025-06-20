@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::{fs, io};
 
 const DEFAULT_APP_SUBDIR: &str = "synco";
-const DEFAULT_SERVER_CLIENT_CERT_STORAGE: &str = "client";
+const DEFAULT_CLIENT_CERT_STORAGE: &str = "client";
+const DEFAULT_SERVER_CERT_STORAGE: &str = "server";
+
 pub fn get_default_application_dir() -> PathBuf {
     let mut app_data_dir = dirs::data_dir()
         .ok_or_else(|| {
@@ -35,7 +37,36 @@ Generates client storage on SERVER side for storing signed client PEM
 */
 pub fn get_client_cert_storage_server() -> PathBuf {
     let dir = get_default_application_dir();
-    fs::create_dir_all(&dir.join(DEFAULT_SERVER_CLIENT_CERT_STORAGE)).unwrap();
+    fs::create_dir_all(&dir.join(DEFAULT_CLIENT_CERT_STORAGE)).unwrap();
 
-    dir.join(DEFAULT_SERVER_CLIENT_CERT_STORAGE)
+    dir.join(DEFAULT_CLIENT_CERT_STORAGE)
+}
+
+pub fn get_server_cert_storage() -> PathBuf {
+    let dir = get_default_application_dir();
+    fs::create_dir_all(&dir.join(DEFAULT_SERVER_CERT_STORAGE)).unwrap();
+
+    dir.join(DEFAULT_SERVER_CERT_STORAGE)
+}
+
+
+pub fn validate_server_cert_present() -> bool {
+    let server_cert_path = get_server_cert_storage();
+    if server_cert_path.exists() {
+        let entries: Vec<_> = fs::read_dir(server_cert_path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        if entries.is_empty() {
+            return false;
+        }
+
+        println!("------------------------------");
+        for path in entries.into_iter() {
+            println!("Found CA: {}", path.file_name().to_str().unwrap());
+        }
+        return true;
+    }
+    false
 }

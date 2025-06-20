@@ -6,8 +6,9 @@ use rcgen::{
 use std::error::Error;
 use std::fs;
 use std::fs::File;
+use std::path::PathBuf;
 
-pub fn sign_client_csr(csr_pem: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem)?;
 
     let mut client_params = CertificateParams::default();
@@ -16,12 +17,13 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<String, Box<dyn Error + Send + S
     client_params.subject_alt_names = csr.params.subject_alt_names;
     client_params
         .extended_key_usages
-        .push(ExtendedKeyUsagePurpose::ServerAuth);
+        .push(ExtendedKeyUsagePurpose::ClientAuth);
 
     client_params.is_ca = IsCa::NoCa;
-    client_params
-        .key_usages
-        .push(KeyUsagePurpose::DigitalSignature);
+    client_params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyAgreement,
+    ];
 
     client_params.not_before = date_time_ymd(1975, 1, 1);
     client_params.not_after = date_time_ymd(4096, 1, 1);
@@ -31,8 +33,7 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<String, Box<dyn Error + Send + S
 
     let client_cert = client_params
         .clone()
-        .signed_by(&*loaded_pk, &loaded_crt, &loaded_pk)
-        .unwrap();
+        .signed_by(&*loaded_pk, &loaded_crt, &loaded_pk)?;
 
     let client_cert_pem = client_cert.pem();
 
@@ -61,15 +62,15 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<String, Box<dyn Error + Send + S
         client_cert_path.display()
     );
 
-    Ok(client_cert_path.display().to_string())
+    Ok(client_cert_path)
 }
 
 mod crt_test {
+    use crate::server::tls_utils::sign_client_csr;
     use crate::utils::get_client_cert_storage_server;
     use rcgen::{CertificateParams, DnType, DnValue, KeyPair};
     use std::fs;
     use uuid::Uuid;
-    use crate::server::tls_utils::sign_client_csr;
 
     #[test]
     fn test_client_signing() {
@@ -82,7 +83,8 @@ mod crt_test {
             let err = server_signed_csr.err().unwrap();
             panic!("User certificate signing has failed: {}", err);
         }
-        
+
+        assert!(server_signed_csr.unwrap().exists());
         
     }
 

@@ -1,4 +1,4 @@
-use crate::utils::get_default_application_dir;
+use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use base32::Alphabet;
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -7,17 +7,22 @@ use error::Error;
 use lazy_static::lazy_static;
 use pkcs8::ObjectIdentifier;
 use rand::rngs::OsRng;
-use rcgen::BasicConstraints::Unconstrained;
 use rcgen::{
-    Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa, KeyPair, PKCS_ED25519,
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519,
 };
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Read, Write};
+use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::{error, fs, io};
 
 const PRIVATE_KEY_FILE_NAME: &str = "key.pem";
 const CERT_FILE_NAME: &str = "cert.pem";
+const CA_CERT_FILE_NAME: &str = "ca.crt";
+const CA_KEY_FILE_NAME: &str = "ca.key";
 const SIGNING_KEY: &str = "signing_key.bin";
 
 const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
@@ -38,6 +43,50 @@ pub fn sign(msg: String) -> Result<Signature, Box<dyn Error + Send + Sync>> {
 
     cp.try_sign(msg.as_bytes())
         .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
+}
+
+pub fn generate_server_ca() -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
+    println!("Generating new CA certificate for server operations...");
+
+    let mut ca_params = CertificateParams::new(vec![])?;
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "synco server".to_string());
+
+    ca_params
+        .distinguished_name
+        .push(DnType::OrganizationName, "synco CA".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::OrganizationalUnitName, "synco".to_string());
+
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+
+    ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
+
+    let ca_keypair = KeyPair::generate()?;
+
+    let ca_cert = ca_params.self_signed(&ca_keypair)?;
+    let ca_cert_pem = ca_cert.pem();
+    let ca_private_key_pem = ca_keypair.serialize_pem();
+
+    let server_storage: PathBuf = get_server_cert_storage();
+    fs::create_dir_all(&server_storage)?;
+
+    let ca_cert_path = server_storage.join(CA_CERT_FILE_NAME);
+    let ca_key_path = server_storage.join(CA_KEY_FILE_NAME);
+
+    fs::write(&ca_cert_path, ca_cert_pem.as_bytes())?;
+    fs::write(&ca_key_path, ca_private_key_pem.as_bytes())?;
+
+    println!("Root CA generated and saved at: {}", ca_cert_path.display());
+    println!("Main CA generated and saved at: {}", ca_key_path.display());
+
+    Ok((ca_cert_path, ca_key_path))
 }
 
 fn load_signing_key_or_create() -> Result<SigningKey, Box<dyn Error + Send + Sync>> {
@@ -96,8 +145,12 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
         DnType::CommonName,
         DnValue::PrintableString("synco".try_into().unwrap()),
     );
-    //marks the CA as signer
-    params.is_ca = IsCa::Ca(Unconstrained);
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.is_ca = IsCa::NoCa;
 
     let keypair = generate_keypair()?;
 
@@ -127,16 +180,26 @@ pub fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
 }
 
 pub(crate) fn load_private_key_arc() -> io::Result<Arc<KeyPair>> {
-    let private_key = load_private_key(false)?;
+    let private_key = load_server_private_key(false)?;
     Ok(Arc::new(private_key))
 }
 
 pub(crate) fn load_cert_arc() -> io::Result<Arc<Certificate>> {
-    let certs = load_cert(false)?;
+    let certs = load_server_cert(false)?;
     Ok(Arc::new(certs))
 }
 
-fn load_cert(called_within: bool) -> io::Result<Certificate> {
+pub(crate) fn load_private_key_der() -> io::Result<PrivateKeyDer<'static>> {
+    let private_key = load_server_private_key(false)?;
+    Ok(PrivateKeyDer::try_from(private_key.public_key_der()).expect("Cannot cast."))
+}
+
+pub(crate) fn load_cert_der() -> io::Result<CertificateDer<'static>> {
+    let certs: Certificate = load_server_cert(false)?;
+    Ok(CertificateDer::from(certs.der().to_vec()))
+}
+
+fn load_server_cert(called_within: bool) -> io::Result<Certificate> {
     let app_data_dir = get_default_application_dir();
     let cert_path = app_data_dir.join(CERT_FILE_NAME);
 
@@ -159,7 +222,7 @@ fn load_cert(called_within: bool) -> io::Result<Certificate> {
                 }
                 println!("Creating certificates...");
                 generate_cert_keys().unwrap();
-                load_cert(true)
+                load_server_cert(true)
             }
             ErrorKind::PermissionDenied => {
                 eprintln!(
@@ -172,30 +235,17 @@ fn load_cert(called_within: bool) -> io::Result<Certificate> {
     }
 }
 
-fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
+fn load_server_private_key(called_within: bool) -> io::Result<KeyPair> {
     let app_data_dir = get_default_application_dir();
     let key_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
 
-    let file = OpenOptions::new().read(true).open(&key_path);
-    match file {
-        Ok(_) => {
-            let mut reader = BufReader::new(file?);
-            let mut pem_string = "".to_string();
-            reader.read_to_string(&mut pem_string).expect(
-                format!(
-                    "Cannot properly read loaded key - check it {:?}",
-                    key_path.display()
-                )
-                .as_str(),
-            );
-
-            KeyPair::from_pem(&pem_string).map_err(|e| {
-                io::Error::new(
-                    ErrorKind::InvalidData,
-                    "[CONNECTION] Cannot read PEM to KeyPair",
-                )
-            })
-        }
+    match load_pk(&key_path).map_err(|e| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "[CONNECTION] Cannot read PEM to KeyPair",
+        )
+    }) {
+        Ok(pk) => Ok(pk),
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {
                 if called_within {
@@ -203,7 +253,7 @@ fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
                 }
                 println!("Creating certificates...");
                 generate_cert_keys().unwrap();
-                load_private_key(true)
+                load_server_private_key(true)
             }
             ErrorKind::PermissionDenied => {
                 eprintln!(
@@ -213,6 +263,49 @@ fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
             }
             _ => Err(err),
         },
+    }
+}
+
+pub fn load_crt(path: &PathBuf) -> Result<Certificate, Box<dyn Error + Send + Sync>> {
+    if !path.exists() {
+        Err(Box::new(io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "Cannot find specified PK file: {}",
+                path.as_path().display().to_string()
+            ),
+        )))
+    } else {
+        let file = File::open(path);
+        let mut reader = BufReader::new(file?);
+        let mut pem_string = String::new();
+
+        reader.read_to_string(&mut pem_string).unwrap();
+
+        let cert_iter = CertificateParams::from_ca_cert_pem(&pem_string).unwrap();
+        let loaded_kp = load_private_key_arc()?;
+
+        Ok(cert_iter.self_signed(&loaded_kp).unwrap())
+    }
+}
+
+pub fn load_pk(path: &PathBuf) -> Result<KeyPair, Box<dyn Error + Send + Sync>> {
+    if !path.exists() {
+        Err(Box::new(io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "Cannot find specified PK file: {}",
+                path.as_path().display().to_string()
+            ),
+        )))
+    } else {
+        let file = File::open(path);
+        let mut reader = BufReader::new(file?);
+        let mut pem_string = String::new();
+
+        reader.read_to_string(&mut pem_string).unwrap();
+
+        Ok(KeyPair::from_pem(&pem_string)?)
     }
 }
 
@@ -232,12 +325,19 @@ pub fn device_id() -> Option<String> {
     Some(device_id)
 }
 
+pub fn get_server_ca_crt_path() -> PathBuf {
+    get_server_cert_storage().join(CA_CERT_FILE_NAME)
+}
+pub fn get_server_key_crt_path() -> PathBuf {
+    get_server_cert_storage().join(CA_KEY_FILE_NAME)
+}
+
 mod keychain_test {
     use crate::keychain::*;
 
     #[test]
     fn load_certs_test() {
-        let res = load_cert(false);
+        let res = load_server_cert(false);
         if res.is_err() {
             panic!("[CONNECTION] Cannot extract CERT, {}", res.err().unwrap());
         }
@@ -247,7 +347,7 @@ mod keychain_test {
 
     #[test]
     fn load_pk_test() {
-        let res = load_private_key(false);
+        let res = load_server_private_key(false);
         if res.is_err() {
             panic!("[CONNECTION] Cannot extract PK, {}", res.err().unwrap());
         }
