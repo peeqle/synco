@@ -1,5 +1,6 @@
 use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
+use crate::connection::ChallengeEvent;
 use crate::device_manager::{DeviceManagerQuery, query_known_devices};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
@@ -87,7 +88,7 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 pub async fn start_listener(
     sender_id: String,
     device_manager_tx: Sender<DeviceManagerQuery>,
-    challenges_sender: Sender<(String, SocketAddr)>,
+    challenges_sender: Sender<ChallengeEvent>,
 ) -> Result<(), NetError> {
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
@@ -124,7 +125,9 @@ pub async fn start_listener(
                     //generate challenge
                     if msg.wants_to_connect {
                         challenges_sender
-                            .send((msg.device_id.clone(), remote_addr))
+                            .send(ChallengeEvent::NewDevice {
+                                device_id: msg.device_id.clone(),
+                            })
                             .await?;
                     }
                 }

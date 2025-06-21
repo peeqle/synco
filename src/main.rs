@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use crate::connection::ChallengeManager;
+use crate::connection::{ChallengeEvent, ChallengeManager};
 use crate::device_manager::{DeviceManager, DeviceManagerQuery};
 use crate::machine_utils::get_local_ip;
 use tokio::time::sleep;
@@ -35,9 +35,9 @@ async fn main() -> Result<(), NetError> {
     println!("My Listening Port: {}", listening_port);
     println!("My Local IP: {}", local_ip);
 
-    let (dv_rx, dv_tx) = mpsc::channel::<DeviceManagerQuery>(100);
+    let (dv_sd, dv_rc) = mpsc::channel::<DeviceManagerQuery>(100);
 
-    let device_manager = DeviceManager::new(dv_tx);
+    let device_manager = DeviceManager::new(dv_rc);
     let known_devices = device_manager.get_known_devices();
 
     let device_manager_arc = Arc::new(Mutex::new(device_manager));
@@ -49,14 +49,14 @@ async fn main() -> Result<(), NetError> {
         }
     });
 
-    let (challenge_sender, challenge_receiver) = mpsc::channel::<(String, SocketAddr)>(100);
+    let (challenge_sender, challenge_receiver) = mpsc::channel::<ChallengeEvent>(100);
     let mut challenge_manager = ChallengeManager::new(challenge_receiver);
 
     let challenge_manager_handle = tokio::spawn(async move { challenge_manager.run().await });
 
     let listener_handle = tokio::spawn(broadcast::start_listener(
         device_id.clone(),
-        dv_rx,
+        dv_sd,
         challenge_sender.clone(),
     ));
 

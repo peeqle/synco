@@ -5,7 +5,7 @@ use crate::utils::validate_server_cert_present;
 use lazy_static::lazy_static;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{ServerConfig, crypto};
+use rustls::{crypto, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -16,6 +16,7 @@ use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -26,7 +27,7 @@ mod tls_utils;
 const DEFAULT_SERVER_PORT: u64 = 21029;
 
 lazy_static! {
-    pub static ref MAIN_SERVER: Arc<TcpServer> = {
+    pub static ref DefaultServer: Arc<TcpServer> = {
         let channel = mpsc::channel::<ConnectionRequestQuery>(500);
         let tcp_server = TcpServer::new(channel).expect("Cannot create new TcpServer instance");
         Arc::new(tcp_server)
@@ -74,59 +75,19 @@ pub enum ConnectionRequestQuery {
     },
     ChallengeRequest {
         device_id: String,
-        //encoded BLAKE3 x ed25519 string
         nonce: Vec<u8>,
+        passphrase_hash: Vec<u8>,
     },
     ChallengeResponse {
         device_id: String,
-        //uuid
-        nonce: Vec<u8>,
-        //string
-        passphrase_hash: Vec<u8>,
+        //encoded BLAKE3 x ed25519 string
+        response: Vec<u8>,
     },
     AcceptConnection(String),
     RejectConnection(String),
 }
 
 impl TcpServer {
-    async fn start(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let listener =
-            TcpListener::bind(format!("{}:{}", &self.local_ip, DEFAULT_SERVER_PORT)).await?;
-        println!(
-            "Server listening on {}:{}",
-            &self.local_ip, DEFAULT_SERVER_PORT
-        );
-
-        loop {
-            let (socket, peer_addr) = listener.accept().await?;
-            let acceptor = self.current_acceptor.clone();
-
-            tokio::spawn(async move {
-                match acceptor.accept(socket).await {
-                    Ok(mut tls_stream) => {
-                        let mut buf = Vec::new();
-                        let (tcp_stream, server_connection) = tls_stream.get_ref();
-                        match tcp_stream.try_read(&mut buf) {
-                            Ok(n) => println!(
-                                "Read {} bytes from client: {:?}",
-                                n,
-                                String::from_utf8_lossy(&buf)
-                            ),
-                            Err(e) => eprintln!("Error reading from client: {}", e),
-                        }
-                        match tcp_stream.try_write(b"Hello from server!") {
-                            Ok(_) => println!("Sent data to client."),
-                            Err(e) => eprintln!("Error writing to client: {}", e),
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
-                    }
-                }
-            });
-        }
-    }
-
     fn new(
         server_channel: (
             Sender<ConnectionRequestQuery>,
@@ -176,6 +137,26 @@ impl TcpServer {
             .with_cert_resolver(server_cert_resolver);
 
         Ok(config)
+    }
+
+    async fn _start(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener =
+            TcpListener::bind(format!("{}:{}", &self.local_ip, DEFAULT_SERVER_PORT)).await?;
+        println!(
+            "Server listening on {}:{}",
+            &self.local_ip, DEFAULT_SERVER_PORT
+        );
+
+        loop {
+            tokio::select! {
+            Ok((socket, peer_addr)) = listener.accept() => {
+                                let acceptor = self.current_acceptor.clone();
+                                tokio::spawn(async move {
+                                    match acceptor.accept(socket).await {
+                                        Ok(mut tls_stream) => {
+                                let(reader, writer) = tls_stream.get_ref();
+                                let mut buf = [0;1024];let read_result = reader.try_read(&mut buf);}Err(e) => {eprintln!("TLS handshake failed with {}: {}", peer_addr, e);}}});}}
+        }
     }
 
     pub fn get_channel_sender(&self) -> Sender<ConnectionRequestQuery> {
