@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +8,9 @@ use uuid::Uuid;
 use crate::connection::{ChallengeEvent, ChallengeManager};
 use crate::device_manager::{DeviceManager, DeviceManagerQuery};
 use crate::machine_utils::get_local_ip;
+use crate::server::DefaultServer;
 use tokio::time::sleep;
+use crate::consts::DEFAULT_LISTENING_PORT;
 
 mod balancer;
 mod broadcast;
@@ -21,18 +22,18 @@ mod keychain;
 mod machine_utils;
 mod server;
 mod utils;
+mod consts;
 
 type NetError = Box<dyn Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> Result<(), NetError> {
     let device_id = keychain::device_id().unwrap_or_else(|| Uuid::new_v4().to_string());
-
-    let listening_port: u16 = 22001;
+    
     let local_ip = get_local_ip().expect("Could not determine local IP address");
 
     println!("My Device ID: {}", device_id);
-    println!("My Listening Port: {}", listening_port);
+    println!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
     println!("My Local IP: {}", local_ip);
 
     let (dv_sd, dv_rc) = mpsc::channel::<DeviceManagerQuery>(100);
@@ -62,7 +63,7 @@ async fn main() -> Result<(), NetError> {
 
     let announcer_handle = tokio::spawn(broadcast::start_broadcast_announcer(
         device_id.clone(),
-        listening_port,
+        DEFAULT_LISTENING_PORT,
         local_ip,
     ));
 
@@ -81,11 +82,14 @@ async fn main() -> Result<(), NetError> {
         }
     });
 
+    let default_server = Arc::clone(&DefaultServer);
+    tokio::spawn(async move { default_server.start().await });
+
     tokio::try_join!(
         listener_handle,
         announcer_handle,
         manager_handle,
-        challenge_manager_handle
+        challenge_manager_handle,
     );
 
     Ok(())

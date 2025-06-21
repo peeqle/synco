@@ -1,11 +1,14 @@
-use crate::client::load_client_cas;
-use crate::keychain::{load_cert_der, load_private_key_der};
+use crate::NetError;
+use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
+use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
-use crate::utils::validate_server_cert_present;
+use crate::utils::{
+    get_client_cert_storage_server, get_server_cert_storage, load_cas, validate_server_cert_present,
+};
 use lazy_static::lazy_static;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig};
+use rustls::{ServerConfig, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -23,8 +26,6 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_rustls::TlsAcceptor;
 
 mod tls_utils;
-
-const DEFAULT_SERVER_PORT: u64 = 21029;
 
 lazy_static! {
     pub static ref DefaultServer: Arc<TcpServer> = {
@@ -96,10 +97,13 @@ impl TcpServer {
     ) -> Result<TcpServer, Box<dyn Error + Send + Sync>> {
         let validation = validate_server_cert_present();
         if !validation {
-            return Err(Box::new(io::Error::new(
-                ErrorKind::InvalidData,
-                "Server certificates are invalid, try to run [regenerate]",
-            )));
+            let res = generate_server_ca_keys();
+            if res.is_err() {
+                return Err(Box::new(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Server certificates are invalid, try to run [regenerate]",
+                )));
+            }
         }
         let configuration = Self::create_server_config()?;
         Ok(TcpServer {
@@ -113,11 +117,11 @@ impl TcpServer {
     fn create_server_config() -> io::Result<ServerConfig> {
         let server_certs = load_cert_der()?;
         let server_key = load_private_key_der()?;
-
-        let client_root_store = load_client_cas()?;
+        
+        let server_ca_verification = load_cas(&get_server_cert_storage().join(CA_CERT_FILE_NAME))?;
 
         let client_cert_verifier: Arc<dyn ClientCertVerifier> = {
-            WebPkiClientVerifier::builder(Arc::new(client_root_store))
+            WebPkiClientVerifier::builder(Arc::new(server_ca_verification))
                 .build()
                 .map_err(|e| {
                     io::Error::new(
@@ -139,23 +143,31 @@ impl TcpServer {
         Ok(config)
     }
 
-    async fn _start(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn start(&self) -> Result<(), NetError> {
         let listener =
             TcpListener::bind(format!("{}:{}", &self.local_ip, DEFAULT_SERVER_PORT)).await?;
-        println!(
-            "Server listening on {}:{}",
-            &self.local_ip, DEFAULT_SERVER_PORT
-        );
 
         loop {
-            tokio::select! {
-            Ok((socket, peer_addr)) = listener.accept() => {
-                                let acceptor = self.current_acceptor.clone();
-                                tokio::spawn(async move {
-                                    match acceptor.accept(socket).await {
-                                        Ok(mut tls_stream) => {
-                                let(reader, writer) = tls_stream.get_ref();
-                                let mut buf = [0;1024];let read_result = reader.try_read(&mut buf);}Err(e) => {eprintln!("TLS handshake failed with {}: {}", peer_addr, e);}}});}}
+            let (socket, peer_addr) = listener.accept().await?;
+
+            let acceptor = self.current_acceptor.clone();
+            tokio::spawn(async move {
+                match acceptor.accept(socket).await {
+                    Ok(mut tls_stream) => {
+                        let (reader, writer) = tls_stream.get_ref();
+                        let mut buf = [0; 1024];
+                        let read_result = reader.try_read(&mut buf);
+
+                        println!(
+                            "{}",
+                            format!("RESULT: {}", String::from_utf8_lossy(buf.as_slice()))
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
+                    }
+                }
+            });
         }
     }
 

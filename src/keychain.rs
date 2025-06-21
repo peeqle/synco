@@ -5,7 +5,6 @@ use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use error::Error;
 use lazy_static::lazy_static;
-use pkcs8::ObjectIdentifier;
 use rand::rngs::OsRng;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue,
@@ -18,14 +17,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{error, fs, io};
-
-const PRIVATE_KEY_FILE_NAME: &str = "key.pem";
-const CERT_FILE_NAME: &str = "cert.pem";
-const CA_CERT_FILE_NAME: &str = "ca.crt";
-const CA_KEY_FILE_NAME: &str = "ca.key";
-const SIGNING_KEY: &str = "signing_key.bin";
-
-const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+use crate::consts::{CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
 
 lazy_static! {
     pub static ref DEVICE_SIGNING_KEY: Arc<SigningKey> = {
@@ -45,7 +37,7 @@ pub fn sign(msg: String) -> Result<Signature, Box<dyn Error + Send + Sync>> {
         .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
 }
 
-pub fn generate_server_ca() -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
+pub fn generate_server_ca_keys() -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
     println!("Generating new CA certificate for server operations...");
 
     let mut ca_params = CertificateParams::new(vec![])?;
@@ -191,7 +183,7 @@ pub(crate) fn load_cert_arc() -> io::Result<Arc<Certificate>> {
 
 pub(crate) fn load_private_key_der() -> io::Result<PrivateKeyDer<'static>> {
     let private_key = load_server_private_key(false)?;
-    Ok(PrivateKeyDer::try_from(private_key.public_key_der()).expect("Cannot cast."))
+    Ok(PrivateKeyDer::try_from(private_key.serialize_der()).expect("Cannot cast"))
 }
 
 pub(crate) fn load_cert_der() -> io::Result<CertificateDer<'static>> {

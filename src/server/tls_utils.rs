@@ -87,7 +87,7 @@ mod crt_test {
         assert!(server_signed_csr.unwrap().exists());
         
     }
-
+    
     fn clear_client_cert_dir() {
         let dir = get_client_cert_storage_server();
         fs::remove_dir_all(dir).expect("Cannot clear client cert DIR");

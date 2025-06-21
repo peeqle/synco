@@ -1,10 +1,9 @@
-use std::io::ErrorKind;
-use std::path::PathBuf;
+use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
+use rustls::RootCertStore;
+use std::fs::File;
+use std::io::{BufReader, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::{fs, io};
-
-const DEFAULT_APP_SUBDIR: &str = "synco";
-const DEFAULT_CLIENT_CERT_STORAGE: &str = "client";
-const DEFAULT_SERVER_CERT_STORAGE: &str = "server";
 
 pub fn get_default_application_dir() -> PathBuf {
     let mut app_data_dir = dirs::data_dir()
@@ -32,6 +31,18 @@ pub fn get_default_application_dir() -> PathBuf {
     app_data_dir
 }
 
+pub(crate) fn load_cas<T: AsRef<Path>>(path: T) -> io::Result<RootCertStore> {
+    let mut root_store = RootCertStore::empty();
+    let mut reader = BufReader::new(File::open(path)?);
+    let certs = rustls_pemfile::certs(&mut reader);
+    for cert in certs {
+        root_store
+            .add(cert?)
+            .expect("Cannot add cert to the client's RootCertStore");
+    }
+    Ok(root_store)
+}
+
 /**
 Generates client storage on SERVER side for storing signed client PEM
 */
@@ -48,7 +59,6 @@ pub fn get_server_cert_storage() -> PathBuf {
 
     dir.join(DEFAULT_SERVER_CERT_STORAGE)
 }
-
 
 pub fn validate_server_cert_present() -> bool {
     let server_cert_path = get_server_cert_storage();
