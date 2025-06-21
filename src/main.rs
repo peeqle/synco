@@ -1,53 +1,45 @@
-use lazy_static::lazy_static;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::connection::ChallengeManager;
-use crate::device_manager::DeviceManager;
+use crate::device_manager::{DeviceManager, DeviceManagerQuery};
 use local_ip_address::list_afinet_netifas;
 use tokio::time::sleep;
 
 mod balancer;
 mod broadcast;
+mod client;
 mod connection;
 mod device_manager;
 mod diff;
 mod keychain;
 mod server;
-mod client;
 mod utils;
 
 type NetError = Box<dyn Error + Send + Sync>;
 
-lazy_static! {
-    pub static ref DEVICE_MANAGER: Arc<DeviceManager> = {
-        let (found_devices_tx, discovery_rx) = mpsc::channel::<(String, SocketAddr)>(100);
-        Arc::new(DeviceManager::new(discovery_rx, found_devices_tx))
-    };
-}
-
 #[tokio::main]
 async fn main() -> Result<(), NetError> {
-    color_eyre::install()?;
-    
     let device_id = keychain::device_id().unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let my_listening_port: u16 = 22000;
+    let listening_port: u16 = 22001;
     let local_ip = get_local_ip().expect("Could not determine local IP address");
 
     println!("My Device ID: {}", device_id);
-    println!("My Listening Port: {}", my_listening_port);
+    println!("My Listening Port: {}", listening_port);
     println!("My Local IP: {}", local_ip);
 
-    let (found_devices_tx, discovery_rx) = mpsc::channel::<(String, SocketAddr)>(100);
-    let device_manager = DeviceManager::new(discovery_rx, found_devices_tx);
+    let (dv_rx, dv_tx) = mpsc::channel::<DeviceManagerQuery>(100);
+
+    let device_manager = DeviceManager::new(dv_tx);
     let known_devices = device_manager.get_known_devices();
 
-    let device_manager_arc = Arc::new(tokio::sync::Mutex::new(device_manager));
+    let device_manager_arc = Arc::new(Mutex::new(device_manager));
 
     let manager_handle_arc_clone = Arc::clone(&device_manager_arc);
     let manager_handle = tokio::spawn(async move {
@@ -61,16 +53,15 @@ async fn main() -> Result<(), NetError> {
 
     let challenge_manager_handle = tokio::spawn(async move { challenge_manager.run().await });
 
-    let listener_device_manager_arc_clone = Arc::clone(&device_manager_arc);
     let listener_handle = tokio::spawn(broadcast::start_listener(
-        listener_device_manager_arc_clone,
         device_id.clone(),
+        dv_rx,
         challenge_sender.clone(),
     ));
 
     let announcer_handle = tokio::spawn(broadcast::start_broadcast_announcer(
         device_id.clone(),
-        my_listening_port,
+        listening_port,
         local_ip,
     ));
 
@@ -89,15 +80,12 @@ async fn main() -> Result<(), NetError> {
         }
     });
 
-    match tokio::try_join!(
+    tokio::try_join!(
         listener_handle,
         announcer_handle,
         manager_handle,
         challenge_manager_handle
-    ) {
-        Ok(_) => {}
-        Err(_) => {}
-    }
+    );
 
     Ok(())
 }

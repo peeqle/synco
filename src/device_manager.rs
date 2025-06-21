@@ -4,28 +4,48 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Instant, sleep};
 
 pub struct DeviceManager {
     known_devices: SharedKnownDevices,
-    discovery_rx: Receiver<(String, SocketAddr)>,
-    pub(crate) discovery_tx: Sender<(String, SocketAddr)>,
+    rx: Receiver<DeviceManagerQuery>,
+}
+pub enum DeviceManagerQuery {
+    KnownDevices {
+        response: oneshot::Sender<HashMap<String, DiscoveredDevice>>,
+    },
+    NewDevice {
+        device_id: String,
+        socket_addr: SocketAddr,
+    },
+}
+
+pub async fn query_known_devices(
+    device_manager_tx: &Sender<DeviceManagerQuery>,
+) -> HashMap<String, DiscoveredDevice> {
+    let (response_tx, response_rx) = oneshot::channel();
+    let msg = DeviceManagerQuery::KnownDevices {
+        response: response_tx,
+    };
+
+    if device_manager_tx.send(msg).await.is_ok() {
+        if let Ok(devices) = response_rx.await {
+            return devices;
+        }
+    }
+    HashMap::new()
 }
 
 const CLEANUP_DELAY: u64 = 15;
 const MAX_DEAD: u64 = 60 * 5;
 
 impl DeviceManager {
-    pub fn new(
-        discovery_rx: Receiver<(String, SocketAddr)>,
-        discovery_tx: Sender<(String, SocketAddr)>,
-    ) -> Self {
+    pub fn new(rx: Receiver<DeviceManagerQuery>) -> Self {
         DeviceManager {
             known_devices: Arc::new(Mutex::new(HashMap::new())),
-            discovery_rx,
-            discovery_tx,
+            rx,
         }
     }
 
@@ -43,12 +63,17 @@ impl DeviceManager {
 
         loop {
             tokio::select! {
-                Some((device_id, connect_addr)) = self.discovery_rx.recv() => {
-                    println!("RECEIVED {}", device_id);
-                    let mut devices = self.known_devices.lock().await;
-                    let new_device = DiscoveredDevice::new(device_id.clone(), connect_addr);
+                Some(message) = self.rx.recv() => {
+                    match message {
+                DeviceManagerQuery::KnownDevices { response } => {
+                    let device_ids = self.known_devices.lock().await.clone();
+                    let _ = response.send(device_ids);
+                },
+                DeviceManagerQuery::NewDevice { device_id, socket_addr } => {
+                            let current_devices = self.get_known_devices();
+                            let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
 
-                    match devices.entry(device_id) {
+                    match current_devices.clone().lock().await.entry(device_id) {
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             entry.get_mut().update_last_seen();
                             println!("Device Manager: Updated last seen for device {}", entry.key());
@@ -58,10 +83,13 @@ impl DeviceManager {
                             println!("Device Manager: Discovered new device: {:?}", new_device);
                             entry.insert(new_device.clone());
                             // self.device_updates_tx.send(DeviceUpdate::Added(new_device)).await.ok();
+
+                                    }
+                                }
+                            }
                         }
-                    }
                 }
-                else => break,
+                else => break
             }
         }
         cleanup_handle.await.ok();

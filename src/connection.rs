@@ -109,5 +109,6 @@ pub fn generate_challenge(device_id: String, remote_addr: SocketAddr) {
     let signed = keychain::sign(nonce_uuid_hash.to_string())
         .expect("[CONNECTION] Somehow signing issues occurred ;(");
 
+    
     //update status
 }

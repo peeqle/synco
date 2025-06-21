@@ -1,6 +1,6 @@
 use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
-use crate::device_manager::DeviceManager;
+use crate::device_manager::{DeviceManagerQuery, query_known_devices};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::collections::HashMap;
@@ -16,6 +16,8 @@ use tokio::time::{Instant, sleep};
 pub struct DiscoveryMessage {
     pub device_id: String,
     pub listening_port: u16,
+    pub tcp_listening_port: u16,
+    pub tcp_network_ip: Option<IpAddr>,
     pub internal_ip: Option<IpAddr>,
     pub wants_to_connect: bool,
 }
@@ -25,11 +27,15 @@ impl DiscoveryMessage {
         device_id: String,
         listening_port: u16,
         internal_ip: Option<IpAddr>,
+        tcp_listening_port: u16,
+        tcp_network_ip: Option<IpAddr>,
         wants_to_connect: bool,
     ) -> Self {
         DiscoveryMessage {
             device_id,
             listening_port,
+            tcp_listening_port,
+            tcp_network_ip,
             internal_ip,
             wants_to_connect,
         }
@@ -79,18 +85,15 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 // If hashes match, Device B authenticates Device A.
 
 pub async fn start_listener(
-    device_manager_arc: Arc<Mutex<DeviceManager>>,
     sender_id: String,
+    device_manager_tx: Sender<DeviceManagerQuery>,
     challenges_sender: Sender<(String, SocketAddr)>,
 ) -> Result<(), NetError> {
-    let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
+    let listen_addr: SocketAddr = format!("192.168.100.6:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
     println!("Broadcast listener started on {}", listen_addr);
 
     let mut buf = vec![0u8; 1024];
-
-    let device_manager = device_manager_arc.lock().await;
-    let devices_tx = &device_manager.discovery_tx;
 
     loop {
         let (len, peer_addr) = socket.recv_from(&mut buf).await?;
@@ -98,8 +101,7 @@ pub async fn start_listener(
 
         match serde_json::from_str::<DiscoveryMessage>(&message_str) {
             Ok(msg) => {
-                let lck = device_manager.get_known_devices();
-                let known_devices = lck.lock().await;
+                let known_devices = query_known_devices(&device_manager_tx).await;
 
                 if msg.device_id != sender_id
                     && !(known_devices.contains_key(&sender_id)
@@ -117,8 +119,11 @@ pub async fn start_listener(
                         "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
                         msg.device_id, msg.listening_port, remote_addr
                     );
-                    devices_tx
-                        .send((msg.device_id.clone(), remote_addr))
+                    device_manager_tx
+                        .send(DeviceManagerQuery::NewDevice {
+                            device_id: msg.device_id.clone(),
+                            socket_addr: remote_addr,
+                        })
                         .await?;
 
                     //generate challenge
@@ -148,7 +153,14 @@ pub async fn start_broadcast_announcer(
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
-    let message = DiscoveryMessage::new(device_id, listening_port, Some(local_ip), false);
+    let message = DiscoveryMessage::new(
+        device_id,
+        listening_port,
+        Some(local_ip),
+        22000,
+        Some(local_ip),
+        false,
+    );
     let serialized_message = serde_json::to_string(&message)?;
 
     println!("Broadcast announcer started. Sending on {}", broadcast_addr);
@@ -160,5 +172,3 @@ pub async fn start_broadcast_announcer(
         sleep(Duration::from_secs(BROADCAST_INTERVAL_SECONDS)).await;
     }
 }
-
-pub async fn challenge_sender() {}

@@ -67,7 +67,8 @@ impl TcpServer {
                 match acceptor.accept(socket).await {
                     Ok(mut tls_stream) => {
                         let mut buf = Vec::new();
-                        match tls_stream.read_to_end(&mut buf).await {
+                        let (tcp_stream, server_connection) = tls_stream.get_ref();
+                        match tcp_stream.try_read(&mut buf) {
                             Ok(n) => println!(
                                 "Read {} bytes from client: {:?}",
                                 n,
@@ -75,7 +76,7 @@ impl TcpServer {
                             ),
                             Err(e) => eprintln!("Error reading from client: {}", e),
                         }
-                        match tls_stream.write_all(b"Hello from server!").await {
+                        match tcp_stream.try_write(b"Hello from server!") {
                             Ok(_) => println!("Sent data to client."),
                             Err(e) => eprintln!("Error writing to client: {}", e),
                         }
