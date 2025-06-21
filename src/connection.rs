@@ -1,6 +1,5 @@
 use crate::keychain;
 use crate::keychain::load_private_key_arc;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,24 +11,6 @@ use uuid::Uuid;
 
 //device_id -> _, nonce hash, ttl
 type ChallengedDevices = Arc<Mutex<HashMap<String, (SocketAddr, Vec<u8>, Instant)>>>;
-#[derive(Debug, Serialize, Deserialize)]
-pub enum ConnectionRequest {
-    InitialRequest {
-        device_id: String,
-    },
-    ChallengeRequest {
-        //encoded BLAKE3 x ed25519 string
-        nonce: Vec<u8>,
-    },
-    ChallengeResponse {
-        //uuid
-        nonce: Vec<u8>,
-        //string
-        passphrase_hash: Vec<u8>,
-    },
-    AcceptConnection,
-    RejectConnection(String),
-}
 
 pub struct ChallengeManager {
     current_challenges: ChallengedDevices,
@@ -109,6 +90,5 @@ pub fn generate_challenge(device_id: String, remote_addr: SocketAddr) {
     let signed = keychain::sign(nonce_uuid_hash.to_string())
         .expect("[CONNECTION] Somehow signing issues occurred ;(");
 
-    
     //update status
 }

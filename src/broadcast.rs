@@ -103,6 +103,12 @@ pub async fn start_listener(
             Ok(msg) => {
                 let known_devices = query_known_devices(&device_manager_tx).await;
 
+                let remote_addr = msg
+                    .internal_ip
+                    .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
+                        SocketAddr::new(ip, msg.listening_port)
+                    });
+
                 if msg.device_id != sender_id
                     && !(known_devices.contains_key(&sender_id)
                         && known_devices
@@ -110,21 +116,10 @@ pub async fn start_listener(
                             .take_if(|x| x.state == DeviceConnectionState::OPEN)
                             .is_some())
                 {
-                    let remote_addr = msg
-                        .internal_ip
-                        .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
-                            SocketAddr::new(ip, msg.listening_port)
-                        });
                     println!(
                         "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
                         msg.device_id, msg.listening_port, remote_addr
                     );
-                    device_manager_tx
-                        .send(DeviceManagerQuery::NewDevice {
-                            device_id: msg.device_id.clone(),
-                            socket_addr: remote_addr,
-                        })
-                        .await?;
 
                     //generate challenge
                     if msg.wants_to_connect {
@@ -133,6 +128,12 @@ pub async fn start_listener(
                             .await?;
                     }
                 }
+                device_manager_tx
+                    .send(DeviceManagerQuery::DiscoveredDevice {
+                        device_id: msg.device_id.clone(),
+                        socket_addr: remote_addr,
+                    })
+                    .await?;
             }
             Err(e) => {
                 eprintln!(
@@ -150,7 +151,7 @@ pub async fn start_broadcast_announcer(
     local_ip: IpAddr,
 ) -> Result<(), NetError> {
     let broadcast_addr: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
-    let socket = UdpSocket::bind(format!("192.168.100.6:{}", 0)).await?;
+    let socket = UdpSocket::bind(format!("{}:{}", local_ip, 0)).await?;
     socket.set_broadcast(true)?;
 
     let message = DiscoveryMessage::new(

@@ -16,7 +16,10 @@ pub enum DeviceManagerQuery {
     KnownDevices {
         response: oneshot::Sender<HashMap<String, DiscoveredDevice>>,
     },
-    NewDevice {
+    /**
+    Add new or update existing
+    */
+    DiscoveredDevice {
         device_id: String,
         socket_addr: SocketAddr,
     },
@@ -69,7 +72,7 @@ impl DeviceManager {
                     let device_ids = self.known_devices.lock().await.clone();
                     let _ = response.send(device_ids);
                 },
-                DeviceManagerQuery::NewDevice { device_id, socket_addr } => {
+                DeviceManagerQuery::DiscoveredDevice { device_id, socket_addr } => {
                             let current_devices = self.get_known_devices();
                             let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
 
@@ -87,7 +90,7 @@ impl DeviceManager {
                                     }
                                 }
                             }
-                        }
+                    }
                 }
                 else => break
             }
