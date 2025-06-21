@@ -89,7 +89,7 @@ pub async fn start_listener(
     device_manager_tx: Sender<DeviceManagerQuery>,
     challenges_sender: Sender<(String, SocketAddr)>,
 ) -> Result<(), NetError> {
-    let listen_addr: SocketAddr = format!("192.168.100.6:{}", DISCOVERY_PORT).parse()?;
+    let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
     println!("Broadcast listener started on {}", listen_addr);
 
@@ -150,7 +150,7 @@ pub async fn start_broadcast_announcer(
     local_ip: IpAddr,
 ) -> Result<(), NetError> {
     let broadcast_addr: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let socket = UdpSocket::bind(format!("192.168.100.6:{}", 0)).await?;
     socket.set_broadcast(true)?;
 
     let message = DiscoveryMessage::new(
