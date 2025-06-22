@@ -1,5 +1,6 @@
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use rustls::RootCertStore;
+use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,28 @@ pub fn get_default_application_dir() -> PathBuf {
     }
 
     app_data_dir
+}
+
+pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<dyn Error>> {
+    if !fs::exists(path.as_ref())? {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::NotFound,
+            format!("File is not found: {}", path.as_ref().display()).as_str(),
+        )));
+    }
+
+    let md = fs::metadata(path.as_ref())?;
+    let permissions = md.permissions();
+    let readonly = permissions.readonly();
+
+    if readonly && need_write {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!("Cannot reach file for write: {}", path.as_ref().display()).as_str(),
+        )));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn load_cas<T: AsRef<Path>>(path: T) -> io::Result<RootCertStore> {
