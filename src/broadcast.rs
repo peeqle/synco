@@ -2,6 +2,7 @@ use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::connection::ChallengeEvent;
 use crate::device_manager::{DeviceManagerQuery, query_known_devices};
+use crate::keychain::device_id;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::collections::HashMap;
@@ -109,34 +110,40 @@ pub async fn start_listener(
                     .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
                         SocketAddr::new(ip, msg.listening_port)
                     });
-
-                if msg.device_id != sender_id
-                    && !(known_devices.contains_key(&sender_id)
+                println!(
+                    "device {:?} device id : {:?} sender id: {:?}",
+                    msg,
+                    device_id().unwrap(),
+                    sender_id
+                );
+                if msg.device_id != sender_id {
+                    if !(known_devices.contains_key(&sender_id)
                         && known_devices
                             .get(&sender_id)
                             .take_if(|x| x.state == DeviceConnectionState::OPEN)
                             .is_some())
-                {
-                    println!(
-                        "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
-                        msg.device_id, msg.listening_port, remote_addr
-                    );
+                    {
+                        println!(
+                            "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
+                            msg.device_id, msg.listening_port, remote_addr
+                        );
 
-                    //generate challenge
-                    if msg.wants_to_connect {
-                        challenges_sender
-                            .send(ChallengeEvent::NewDevice {
-                                device_id: msg.device_id.clone(),
-                            })
-                            .await?;
+                        //generate challenge
+                        if msg.wants_to_connect {
+                            challenges_sender
+                                .send(ChallengeEvent::NewDevice {
+                                    device_id: msg.device_id.clone(),
+                                })
+                                .await?;
+                        }
                     }
+                    device_manager_tx
+                        .send(DeviceManagerQuery::DiscoveredDevice {
+                            device_id: msg.device_id.clone(),
+                            socket_addr: remote_addr,
+                        })
+                        .await?;
                 }
-                device_manager_tx
-                    .send(DeviceManagerQuery::DiscoveredDevice {
-                        device_id: msg.device_id.clone(),
-                        socket_addr: remote_addr,
-                    })
-                    .await?;
             }
             Err(e) => {
                 eprintln!(
