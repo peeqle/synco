@@ -32,7 +32,7 @@ pub fn get_default_application_dir() -> PathBuf {
     app_data_dir
 }
 
-pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<dyn Error>> {
+pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<io::Error> > {
     if !fs::exists(path.as_ref())? {
         return Err(Box::new(io::Error::new(
             ErrorKind::NotFound,

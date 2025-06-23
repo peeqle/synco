@@ -100,6 +100,7 @@ impl DeviceManager {
     }
 
     async fn cleanup(_devices: SharedKnownDevices) {
+        println!("Device cleaner has started");
         loop {
             sleep(Duration::from_secs(CLEANUP_DELAY)).await;
 

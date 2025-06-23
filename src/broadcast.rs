@@ -1,6 +1,7 @@
 use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::connection::ChallengeEvent;
+use crate::consts::DeviceId;
 use crate::device_manager::{DeviceManagerQuery, query_known_devices};
 use crate::keychain::device_id;
 use serde::{Deserialize, Serialize};
@@ -87,7 +88,6 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 // If hashes match, Device B authenticates Device A.
 
 pub async fn start_listener(
-    sender_id: String,
     device_manager_tx: Sender<DeviceManagerQuery>,
     challenges_sender: Sender<ChallengeEvent>,
 ) -> Result<(), NetError> {
@@ -100,7 +100,7 @@ pub async fn start_listener(
     loop {
         let (len, peer_addr) = socket.recv_from(&mut buf).await?;
         let message_str = String::from_utf8_lossy(&buf[..len]);
-
+        let current_device_id = DeviceId.clone();
         match serde_json::from_str::<DiscoveryMessage>(&message_str) {
             Ok(msg) => {
                 let known_devices = query_known_devices(&device_manager_tx).await;
@@ -113,13 +113,13 @@ pub async fn start_listener(
                 println!(
                     "device {:?} device id : {:?} sender id: {:?}",
                     msg,
-                    device_id().unwrap(),
-                    sender_id
+                    device_id(),
+                    current_device_id
                 );
-                if msg.device_id != sender_id {
-                    if !(known_devices.contains_key(&sender_id)
+                if msg.device_id != current_device_id {
+                    if !(known_devices.contains_key(&current_device_id)
                         && known_devices
-                            .get(&sender_id)
+                            .get(&current_device_id)
                             .take_if(|x| x.state == DeviceConnectionState::OPEN)
                             .is_some())
                     {
@@ -156,7 +156,6 @@ pub async fn start_listener(
 }
 
 pub async fn start_broadcast_announcer(
-    device_id: String,
     listening_port: u16,
     local_ip: IpAddr,
 ) -> Result<(), NetError> {
@@ -165,7 +164,7 @@ pub async fn start_broadcast_announcer(
     socket.set_broadcast(true)?;
 
     let message = DiscoveryMessage::new(
-        device_id,
+        DeviceId.to_string(),
         listening_port,
         Some(local_ip),
         22000,

@@ -1,3 +1,7 @@
+use crate::consts::{
+    CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, DeviceId, PRIVATE_KEY_FILE_NAME,
+    SIGNING_KEY,
+};
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use base32::Alphabet;
 use der::pem::LineEnding;
@@ -17,7 +21,6 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{error, fs, io};
-use crate::consts::{CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
 
 lazy_static! {
     pub static ref DEVICE_SIGNING_KEY: Arc<SigningKey> = {
@@ -129,10 +132,9 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
 pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let mut params =
         CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
-    let device_id = device_id().expect("Cannot extract device_id");
-
     let mut cert_name = DistinguishedName::new();
-    cert_name.push(DnType::OrganizationName, device_id);
+
+    cert_name.push(DnType::OrganizationName, DeviceId.to_string());
     cert_name.push(
         DnType::CommonName,
         DnValue::PrintableString("synco".try_into().unwrap()),
@@ -311,10 +313,8 @@ pub fn device_id() -> Option<String> {
     let hash_result = hasher.finalize();
 
     let device_id_raw = &hash_result.as_bytes()[..20];
-    let device_id =
-        base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase();
 
-    Some(device_id)
+    Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
 pub fn get_server_ca_crt_path() -> PathBuf {
