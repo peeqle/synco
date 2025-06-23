@@ -1,6 +1,5 @@
-use crate::consts::{CHALLENGE_DEATH, CLEANUP_DELAY};
+use crate::consts::CHALLENGE_DEATH;
 use crate::keychain;
-use crate::keychain::load_private_key_arc;
 use crate::server::{ConnectionRequestQuery, DefaultServer};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -70,54 +69,47 @@ impl ChallengeManager {
 }
 
 //runs challenge for a device and connects sessions
-pub async fn run() {
+pub async fn challenge_manager_listener_run() {
+    println!("[CHALLENGE MANAGER] Starting...");
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
-    let cleanup_handle = {
-        let _challenges_cleanup = Arc::clone(&challenge_manager);
-        tokio::spawn(async move {
-            cleanup().await;
-        })
-    };
 
-    let private_key_arc = match load_private_key_arc() {
-        Ok(key) => key,
-        Err(e) => {
-            eprintln!("Error loading private key: {}", e);
-            return;
-        }
-    };
+    let _challenges_cleanup = Arc::clone(&challenge_manager);
 
-    loop {
-        let mut manager_lck = challenge_manager.lock().await;
-        tokio::select! {
-            Some(event) = manager_lck.get_receiver().recv() => {
-                match event {
-                    ChallengeEvent::NewDevice{ device_id} => {
-                         // let ch_  = challenges.lock().await;
-                if manager_lck.current_challenges.contains_key(&device_id) {
-                     generate_challenge(device_id).await;
-                }
-                    }
-                    ChallengeEvent::ChallengeVerification{ connection_response } => {
-                        match connection_response {
-                            ConnectionRequestQuery::ChallengeResponse{ device_id,response} => {
+    println!("[CHALLENGE MANAGER] Started.");
 
-                            }
-                            _ => {}
-                            }
+    let main = tokio::spawn(async move {
+        loop {
+            println!("AAAAAAA");
+            let mut manager_lck = challenge_manager.lock().await;
+
+            if let Some(event) = manager_lck.get_receiver().recv().await {
+                if let ChallengeEvent::NewDevice { device_id } = event {
+                    if manager_lck.current_challenges.contains_key(&device_id) {
+                        generate_challenge(device_id).await;
                     }
                 }
-
-            },
-            else => break
+            }
         }
+    });
+   let cleanup_task = tokio::spawn(cleanup());
+
+
+    let (main_result, cleanup_result) = tokio::join!(main, cleanup_task);
+
+    // Handle potential errors
+    if let Err(e) = main_result {
+        eprintln!("[CHALLENGE MANAGER] Main task failed: {:?}", e);
     }
-    cleanup_handle.await.ok();
+
+    if let Err(e) = cleanup_result {
+        eprintln!("[CHALLENGE MANAGER] Cleanup task failed: {:?}", e);
+    }
 }
 
 pub async fn cleanup() {
     let _challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
     loop {
+        println!("SSSSSSSSSSSSSSSSSSSSs");
         let mut ch_locked = _challenges_arc_clone.lock().await;
         let now = Instant::now();
 
@@ -137,7 +129,7 @@ pub async fn cleanup() {
             }
             true
         });
-        sleep(Duration::from_secs(CLEANUP_DELAY)).await;
+        sleep(Duration::from_secs(1)).await;
     }
 }
 

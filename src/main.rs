@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::connection::DefaultChallengeManager;
+use crate::connection::{challenge_manager_listener_run};
 use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
 use crate::device_manager::{DeviceManager, DeviceManagerQuery};
 use crate::machine_utils::get_local_ip;
@@ -51,10 +51,6 @@ async fn main() -> Result<(), NetError> {
         }
     });
 
-    let mut challenge_manager = Arc::clone(&DefaultChallengeManager);
-
-    let challenge_manager_handle = tokio::spawn(async move { challenge_manager.run().await });
-
     let announcer_handle = tokio::spawn(broadcast::start_broadcast_announcer(
         DEFAULT_LISTENING_PORT,
         local_ip,
@@ -82,7 +78,7 @@ async fn main() -> Result<(), NetError> {
         tokio::spawn(broadcast::start_listener(dv_sd)),
         announcer_handle,
         manager_handle,
-        challenge_manager_handle,
+        tokio::spawn(async move { challenge_manager_listener_run().await }),
     );
 
     Ok(())

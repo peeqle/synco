@@ -1198,6 +1198,7 @@ dependencies = [
  "ed25519-dalek",
  "lazy_static",
  "local-ip-address",
+ "log",
  "pkcs8 0.9.0",
  "rand",
  "rcgen",

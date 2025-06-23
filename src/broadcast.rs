@@ -94,7 +94,6 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
 
     let mut buf = vec![0u8; 1024];
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
-    let sender_rc = Arc::new(challenge_manager.get_sender());
 
     loop {
         let (len, peer_addr) = socket.recv_from(&mut buf).await?;
@@ -129,7 +128,10 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
 
                         //generate challenge
                         if msg.wants_to_connect {
-                            sender_rc
+                            challenge_manager
+                                .lock()
+                                .await
+                                .get_sender()
                                 .send(ChallengeEvent::NewDevice {
                                     device_id: msg.device_id.clone(),
                                 })
