@@ -1,6 +1,6 @@
 use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
-use crate::connection::ChallengeEvent;
+use crate::connection::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::DeviceId;
 use crate::device_manager::{DeviceManagerQuery, query_known_devices};
 use crate::keychain::device_id;
@@ -87,15 +87,14 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 // Device B receives the Response, computes the same hash using its knowledge of the passphrase and the nonce it sent, and compares it to Device A's response.
 // If hashes match, Device B authenticates Device A.
 
-pub async fn start_listener(
-    device_manager_tx: Sender<DeviceManagerQuery>,
-    challenges_sender: Sender<ChallengeEvent>,
-) -> Result<(), NetError> {
+pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Result<(), NetError> {
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
     println!("Broadcast listener started on {}", listen_addr);
 
     let mut buf = vec![0u8; 1024];
+    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+    let sender_rc = Arc::new(challenge_manager.get_sender());
 
     loop {
         let (len, peer_addr) = socket.recv_from(&mut buf).await?;
@@ -130,7 +129,7 @@ pub async fn start_listener(
 
                         //generate challenge
                         if msg.wants_to_connect {
-                            challenges_sender
+                            sender_rc
                                 .send(ChallengeEvent::NewDevice {
                                     device_id: msg.device_id.clone(),
                                 })

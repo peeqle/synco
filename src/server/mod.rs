@@ -10,6 +10,7 @@ use rustls::{ServerConfig, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
@@ -17,11 +18,11 @@ use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, mpsc};
 use tokio_rustls::TlsAcceptor;
 
 mod tls_utils;
@@ -62,6 +63,8 @@ pub struct TcpServer {
     local_ip: IpAddr,
     loaded_configuration: ServerConfig,
     current_acceptor: Arc<TlsAcceptor>,
+    //socket_addr to device_id
+    connected_devices: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) bounded_channel: (
         Sender<ConnectionRequestQuery>,
         Receiver<ConnectionRequestQuery>,
@@ -109,6 +112,7 @@ impl TcpServer {
             local_ip: get_local_ip().unwrap(),
             loaded_configuration: configuration.clone(),
             current_acceptor: Arc::new(TlsAcceptor::from(Arc::new(configuration))),
+            connected_devices: Arc::new(Mutex::new(HashMap::new())),
             bounded_channel: server_channel,
         })
     }
@@ -153,10 +157,24 @@ impl TcpServer {
 
             socket.readable().await?;
             let sender_clone = Arc::clone(&some);
+            let connected_devices_clone_arc = Arc::clone(&self.connected_devices);
+            let peer_arc = Arc::new(peer_addr);
+
+            let peer_arc_cl = Arc::clone(&peer_arc);
             tokio::spawn(async move {
                 match acceptor.accept(socket).await {
                     Ok(tls_stream) => {
                         let (reader, writer) = tls_stream.get_ref();
+
+                        {
+                            let cn_lock = connected_devices_clone_arc.lock().await;
+                            
+                            if !cn_lock.contains_key(&peer_arc_cl.ip().to_string()) {
+                                
+                                return;
+                            }
+                        }
+                        
                         let mut buffer = vec![0; 4096];
                         let mut result = vec![];
 

@@ -1,22 +1,29 @@
+use crate::consts::{CHALLENGE_DEATH, CLEANUP_DELAY};
 use crate::keychain;
 use crate::keychain::load_private_key_arc;
 use crate::server::{ConnectionRequestQuery, DefaultServer};
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
-//device_id -> _, nonce hash, ttl
-type ChallengedDevices = Arc<Mutex<HashMap<String, DeviceChallengeStatus>>>;
+lazy_static! {
+    pub static ref DefaultChallengeManager: Arc<Mutex<Box<ChallengeManager>>> = {
+        let channel = mpsc::channel(200);
+        Arc::new(Mutex::new(Box::new(ChallengeManager::new(channel))))
+    };
+}
 
 pub struct ChallengeManager {
-    current_challenges: ChallengedDevices,
+    //device_id -> _, nonce hash, ttl
+    current_challenges: HashMap<String, DeviceChallengeStatus>,
     //receiver for emitted connection event
-    _ch_rx: Receiver<ChallengeEvent>,
+    bounded_channel: (Sender<ChallengeEvent>, Receiver<ChallengeEvent>),
 }
 
 pub enum ChallengeEvent {
@@ -44,89 +51,93 @@ pub enum DeviceChallengeStatus {
 }
 
 impl ChallengeManager {
-    const CLEANUP_DELAY: u64 = 15;
-    const CHALLENGE_DEATH: u64 = 60;
-
-    pub fn new(_ch_rx: Receiver<ChallengeEvent>) -> ChallengeManager {
+    pub fn new(
+        bounded_channel: (Sender<ChallengeEvent>, Receiver<ChallengeEvent>),
+    ) -> ChallengeManager {
         ChallengeManager {
-            current_challenges: Arc::new(Mutex::new(HashMap::new())),
-            _ch_rx,
+            current_challenges: HashMap::new(),
+            bounded_channel,
         }
     }
 
-    //runs challenge for a device and connects sessions
-    pub async fn run(&mut self) {
-        let cleanup_handle = {
-            let _challenges_cleanup = Arc::clone(&self.current_challenges);
-            tokio::spawn(async move {
-                Self::cleanup(_challenges_cleanup).await;
-            })
-        };
-
-        let private_key_arc = match load_private_key_arc() {
-            Ok(key) => key,
-            Err(e) => {
-                eprintln!("Error loading private key: {}", e);
-                return;
-            }
-        };
-
-        let challenges = Arc::clone(&self.current_challenges);
-        loop {
-            tokio::select! {
-                Some(event) = self._ch_rx.recv() => {
-                    match event {
-                        ChallengeEvent::NewDevice{ device_id} => {
-                             let ch_  = challenges.lock().await;
-                    if ch_.contains_key(&device_id) {
-                         generate_challenge(device_id).await;
-                    }
-                        }
-                        ChallengeEvent::ChallengeVerification{ connection_response } => {
-                            match connection_response {
-                                ConnectionRequestQuery::ChallengeResponse{ device_id,response} => {
-
-                                }
-                                _ => {}
-                                }
-                        }
-                    }
-
-                },
-                else => break
-            }
-        }
-        cleanup_handle.await.ok();
+    pub fn get_sender(&self) -> Sender<ChallengeEvent> {
+        self.bounded_channel.0.clone()
     }
 
-    pub async fn cleanup(_challenges: ChallengedDevices) {
-        loop {
-            sleep(Duration::from_secs(Self::CLEANUP_DELAY)).await;
+    fn get_receiver(&mut self) -> &mut Receiver<ChallengeEvent> {
+        &mut self.bounded_channel.1
+    }
+}
 
-            let mut ch_locked = _challenges.lock().await;
-            let now = Instant::now();
+//runs challenge for a device and connects sessions
+pub async fn run() {
+    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+    let cleanup_handle = {
+        let _challenges_cleanup = Arc::clone(&challenge_manager);
+        tokio::spawn(async move {
+            cleanup().await;
+        })
+    };
 
-            ch_locked.retain(|_, status| {
-                match *status {
-                    DeviceChallengeStatus::Active {
-                        ttl, socket_addr, ..
-                    } => {
-                        if now.duration_since(ttl).as_secs() > Self::CHALLENGE_DEATH {
-                            *status = DeviceChallengeStatus::Closed { socket_addr };
-                            return true;
-                        }
+    let private_key_arc = match load_private_key_arc() {
+        Ok(key) => key,
+        Err(e) => {
+            eprintln!("Error loading private key: {}", e);
+            return;
+        }
+    };
+
+    loop {
+        let mut manager_lck = challenge_manager.lock().await;
+        tokio::select! {
+            Some(event) = manager_lck.get_receiver().recv() => {
+                match event {
+                    ChallengeEvent::NewDevice{ device_id} => {
+                         // let ch_  = challenges.lock().await;
+                if manager_lck.current_challenges.contains_key(&device_id) {
+                     generate_challenge(device_id).await;
+                }
                     }
-                    DeviceChallengeStatus::Closed { .. } => {
-                        return false;
+                    ChallengeEvent::ChallengeVerification{ connection_response } => {
+                        match connection_response {
+                            ConnectionRequestQuery::ChallengeResponse{ device_id,response} => {
+
+                            }
+                            _ => {}
+                            }
                     }
                 }
-                true
-            });
+
+            },
+            else => break
         }
     }
+    cleanup_handle.await.ok();
+}
 
-    pub async fn verify_challenge_response(&self, device_id: String, response: Vec<u8>) {
-        let mut ch_locked = self.current_challenges.lock().await;
+pub async fn cleanup() {
+    let _challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
+    loop {
+        let mut ch_locked = _challenges_arc_clone.lock().await;
+        let now = Instant::now();
+
+        ch_locked.as_mut().current_challenges.retain(|_, status| {
+            match *status {
+                DeviceChallengeStatus::Active {
+                    ttl, socket_addr, ..
+                } => {
+                    if now.duration_since(ttl).as_secs() > CHALLENGE_DEATH {
+                        *status = DeviceChallengeStatus::Closed { socket_addr };
+                        return true;
+                    }
+                }
+                DeviceChallengeStatus::Closed { .. } => {
+                    return false;
+                }
+            }
+            true
+        });
+        sleep(Duration::from_secs(CLEANUP_DELAY)).await;
     }
 }
 

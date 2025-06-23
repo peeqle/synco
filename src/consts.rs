@@ -28,4 +28,7 @@ pub const DEFAULT_LISTENING_PORT: u16 = 22001;
 
 pub const BUFFER_SIZE: usize = 16 * 1024;
 
+pub const CLEANUP_DELAY: u64 = 15;
+pub const CHALLENGE_DEATH: u64 = 60;
+
 pub type DAError = Box<dyn Error + Send + Sync>;
