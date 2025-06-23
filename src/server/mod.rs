@@ -2,15 +2,14 @@ use crate::NetError;
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
 use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
-use crate::utils::{
-    get_client_cert_storage_server, get_server_cert_storage, load_cas, validate_server_cert_present,
-};
+use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
 use lazy_static::lazy_static;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
 use rustls::{ServerConfig, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
@@ -18,7 +17,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -69,7 +68,7 @@ pub struct TcpServer {
     ),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConnectionRequestQuery {
     InitialRequest {
         device_id: String,
@@ -117,7 +116,7 @@ impl TcpServer {
     fn create_server_config() -> io::Result<ServerConfig> {
         let server_certs = load_cert_der()?;
         let server_key = load_private_key_der()?;
-        
+
         let server_ca_verification = load_cas(&get_server_cert_storage().join(CA_CERT_FILE_NAME))?;
 
         let client_cert_verifier: Arc<dyn ClientCertVerifier> = {
@@ -147,21 +146,43 @@ impl TcpServer {
         let listener =
             TcpListener::bind(format!("{}:{}", &self.local_ip, DEFAULT_SERVER_PORT)).await?;
 
+        let some = Arc::new(self.bounded_channel.0.clone());
         loop {
             let (socket, peer_addr) = listener.accept().await?;
-
             let acceptor = self.current_acceptor.clone();
+
+            socket.readable().await?;
+            let sender_clone = Arc::clone(&some);
             tokio::spawn(async move {
                 match acceptor.accept(socket).await {
-                    Ok(mut tls_stream) => {
+                    Ok(tls_stream) => {
                         let (reader, writer) = tls_stream.get_ref();
-                        let mut buf = [0; 1024];
-                        let read_result = reader.try_read(&mut buf);
+                        let mut buffer = vec![0; 4096];
+                        let mut result = vec![];
 
-                        println!(
-                            "{}",
-                            format!("RESULT: {}", String::from_utf8_lossy(buf.as_slice()))
-                        );
+                        loop {
+                            let bytes_read = reader.try_read(&mut buffer).unwrap();
+                            if bytes_read == 0 {
+                                break;
+                            }
+                            result.extend_from_slice(&buffer[..bytes_read]);
+                        }
+
+                        if !result.is_empty() {
+                            match serde_json::from_slice::<ConnectionRequestQuery>(
+                                result.as_slice(),
+                            ) {
+                                Ok(query) => {
+                                    sender_clone.send(query).await.unwrap();
+                                }
+                                Err(err) => {
+                                    println!(
+                                        "[SERVER] Error occurred while processing client's message: {}",
+                                        err
+                                    )
+                                }
+                            };
+                        }
                     }
                     Err(e) => {
                         eprintln!("TLS handshake failed with {}: {}", peer_addr, e);

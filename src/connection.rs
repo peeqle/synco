@@ -35,6 +35,7 @@ pub enum DeviceChallengeStatus {
         nonce: String,
         nonce_hash: String,
         passphrase: String,
+        attempts: i16,
         ttl: Instant,
     },
     Closed {

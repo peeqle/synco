@@ -3,7 +3,7 @@
 
 mod util;
 
-use crate::consts::BUFFER_SIZE;
+use crate::consts::{BUFFER_SIZE, DAError};
 use crate::diff::util::is_file_binary_utf8;
 use crate::keychain::device_id;
 use crate::utils::verify_permissions;
@@ -86,7 +86,6 @@ impl FileManager {
                                 }
                             }
 
-
                             let mut lck = self.attached_files.try_lock()?;
 
                             let mut next_id = 1;
@@ -163,13 +162,20 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
 /// 4. Request content from the *synchronizing* point for the [flag_top, flag_bottom]
 /// 5. Load changes, update hashes on both sides
 
-pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) {
+pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), DAError> {
     //create file synchronization stats - here - ???
     //assuming that file is loaded on instant (test only)
     //file hash deviation considered to load instantly
 
+    let mut buf = [0u8; 65536];
+    while reader.try_read(&mut buf)? > 0 {
+        
+    }
+
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut total_bytes_received = 0;
+
+    Ok(())
 }
 
 pub fn blake_digest<T: AsRef<Path>>(path: T) -> Result<Hash, Box<dyn Error>> {
