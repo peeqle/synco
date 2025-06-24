@@ -72,63 +72,71 @@ impl ChallengeManager {
 pub async fn challenge_manager_listener_run() {
     println!("[CHALLENGE MANAGER] Starting...");
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
-    
+
     println!("[CHALLENGE MANAGER] Started.");
 
-    let main = tokio::spawn(async move {
-        loop {
-            println!("AAAAAAA");
-            let mut manager_lck = challenge_manager.lock().await;
+    loop {
+        let mut manager_lck = challenge_manager.lock().await;
+        let event_option = manager_lck.get_receiver().recv().await;
+        drop(manager_lck);
 
-            if let Some(event) = manager_lck.get_receiver().recv().await {
-                if let ChallengeEvent::NewDevice { device_id } = event {
-                    if manager_lck.current_challenges.contains_key(&device_id) {
+        match event_option {
+            None => {}
+            Some(event) => match event {
+                ChallengeEvent::NewDevice { device_id } => {
+                    let challenge_exists = {
+                        let temp_manager_lck = challenge_manager.lock().await;
+                        temp_manager_lck.current_challenges.contains_key(&device_id)
+                    };
+                    if challenge_exists {
                         generate_challenge(device_id).await;
                     }
-                    drop(manager_lck)
                 }
-            }
+                ChallengeEvent::ChallengeVerification { .. } => {}
+            },
         }
-    });
-   let cleanup_task = tokio::spawn(cleanup());
-
-
-    let (main_result, cleanup_result) = tokio::join!(main, cleanup_task);
-
-    // Handle potential errors
-    if let Err(e) = main_result {
-        eprintln!("[CHALLENGE MANAGER] Main task failed: {:?}", e);
-    }
-
-    if let Err(e) = cleanup_result {
-        eprintln!("[CHALLENGE MANAGER] Cleanup task failed: {:?}", e);
     }
 }
 
 pub async fn cleanup() {
-    let _challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
+    let challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
     loop {
-        println!("SSSSSSSSSSSSSSSSSSSSs");
-        let mut ch_locked = _challenges_arc_clone.lock().await;
         let now = Instant::now();
+        let mut challenges_to_notify_closed: Vec<String> = Vec::new();
 
-        ch_locked.as_mut().current_challenges.retain(|_, status| {
-            match *status {
-                DeviceChallengeStatus::Active {
-                    ttl, socket_addr, ..
-                } => {
-                    if now.duration_since(ttl).as_secs() > CHALLENGE_DEATH {
-                        *status = DeviceChallengeStatus::Closed { socket_addr };
-                        return true;
+        {
+            let mut ch_locked = challenges_arc_clone.lock().await;
+
+            ch_locked
+                .current_challenges
+                .retain(|device_id, status| match status {
+                    DeviceChallengeStatus::Active {
+                        ttl, socket_addr, ..
+                    } => {
+                        if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
+                            println!(
+                                "[CLEANUP] Device {} challenge expired. Transitioning to Closed.",
+                                device_id
+                            );
+                            *status = DeviceChallengeStatus::Closed {
+                                socket_addr: *socket_addr,
+                            };
+                            challenges_to_notify_closed.push(device_id.clone());
+                        }
+                        true
                     }
-                }
-                DeviceChallengeStatus::Closed { .. } => {
-                    return false;
-                }
-            }
-            true
-        });
-        sleep(Duration::from_secs(1)).await;
+                    DeviceChallengeStatus::Closed { .. } => {
+                        println!(
+                            "[CLEANUP] Removing already Closed challenge for device {}.",
+                            device_id
+                        );
+                        false
+                    }
+                });
+        }
+
+        println!("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX - Cleanup loop end");
+        // sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -140,6 +148,7 @@ pub async fn generate_challenge(device_id: String) {
     //connect if OK
 
     //generate nonce
+    println!("Generating a challenge for: {}", device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
     let signed = keychain::sign(nonce_uuid_hash.to_string())
         .expect("[CONNECTION] Somehow signing issues occurred ;(");
@@ -154,4 +163,5 @@ pub async fn generate_challenge(device_id: String) {
         })
         .await
         .expect(format!("Cannot generate new challenge for: {}", device_id).as_str());
+    println!("Finished challenge generation for: {}", device_id);
 }

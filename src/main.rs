@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::connection::challenge_manager_listener_run;
+use crate::connection::{challenge_manager_listener_run, cleanup};
 use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
@@ -37,11 +37,11 @@ async fn main() -> Result<(), NetError> {
     println!("My Local IP: {}", local_ip);
 
     let device_manager_arc = Arc::clone(&DefaultDeviceManager);
-
     let default_server = Arc::clone(&DefaultServer);
-
     let dv_cp = device_manager_arc.clone();
-    tokio::spawn(async move {
+    let device_manager_arc_for_join = device_manager_arc.clone();
+    
+    let known_devices_printer_handle =tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(15)).await;
 
@@ -60,8 +60,6 @@ async fn main() -> Result<(), NetError> {
             println!("---------------------------------\n");
         }
     });
-
-    let device_manager_arc_for_join = device_manager_arc.clone();
     tokio::try_join!(
         tokio::spawn(broadcast::start_broadcast_announcer(
             DEFAULT_LISTENING_PORT,
@@ -70,7 +68,9 @@ async fn main() -> Result<(), NetError> {
         tokio::spawn(broadcast::start_listener()),
         tokio::spawn(async move { default_server.start().await }),
         tokio::spawn(async move { device_manager_arc_for_join.start().await }),
-        tokio::spawn(challenge_manager_listener_run())
+        tokio::spawn(challenge_manager_listener_run()),
+        tokio::spawn(connection::cleanup()),
+        known_devices_printer_handle
     );
 
     Ok(())

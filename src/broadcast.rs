@@ -1,17 +1,16 @@
-use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::connection::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::DeviceId;
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
+use crate::NetError;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
-use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveryMessage {
