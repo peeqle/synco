@@ -1,16 +1,17 @@
-use crate::NetError;
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
-use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
+use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der, DEVICE_SIGNING_KEY};
 use crate::machine_utils::get_local_ip;
+use crate::server::ConnectionRequestQuery::ChallengeRequest;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
+use crate::NetError;
+use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{ServerConfig, crypto};
+use rustls::{crypto, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
@@ -22,8 +23,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::TlsAcceptor;
+use uuid::Uuid;
 
 mod tls_utils;
 
@@ -158,9 +160,10 @@ impl TcpServer {
             socket.readable().await?;
             let sender_clone = Arc::clone(&some);
             let connected_devices_clone_arc = Arc::clone(&self.connected_devices);
+            let 
+            
             let peer_arc = Arc::new(peer_addr);
-
-            let peer_arc_cl = Arc::clone(&peer_arc);
+            
             tokio::spawn(async move {
                 match acceptor.accept(socket).await {
                     Ok(tls_stream) => {
@@ -168,13 +171,13 @@ impl TcpServer {
 
                         {
                             let cn_lock = connected_devices_clone_arc.lock().await;
-                            
-                            if !cn_lock.contains_key(&peer_arc_cl.ip().to_string()) {
-                                
+
+                            if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
+                                &self.generate_device_handshake_challenge()
                                 return;
                             }
                         }
-                        
+
                         let mut buffer = vec![0; 4096];
                         let mut result = vec![];
 
@@ -208,6 +211,21 @@ impl TcpServer {
                 }
             });
         }
+    }
+
+    pub async fn generate_device_handshake_challenge(&self, device_id: String, passphrase_hash: Vec<u8>) {
+        let nonce = Uuid::new_v4();
+        let device_pk = DEVICE_SIGNING_KEY.clone();
+
+        let encoded_nonce = device_pk.sign(nonce
+            .as_bytes().as_slice());
+        &self.get_channel_sender()
+            .send(
+                ChallengeRequest {
+                    device_id,
+                    nonce: encoded_nonce.to_vec(),
+                    passphrase_hash,
+                }).await;
     }
 
     pub fn get_channel_sender(&self) -> Sender<ConnectionRequestQuery> {

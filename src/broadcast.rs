@@ -2,16 +2,14 @@ use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::connection::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::DeviceId;
-use crate::device_manager::{DeviceManagerQuery, query_known_devices};
+use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Instant, sleep};
 
@@ -77,7 +75,6 @@ impl DiscoveredDevice {
     }
 }
 
-pub type SharedKnownDevices = Arc<Mutex<HashMap<String, DiscoveredDevice>>>;
 const DISCOVERY_PORT: u16 = 21028;
 const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 
@@ -93,6 +90,10 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
     println!("Broadcast listener started on {}", listen_addr);
 
     let mut buf = vec![0u8; 1024];
+
+    let device_manager_arc = Arc::clone(&DefaultDeviceManager);
+    let known_devices = &device_manager_arc.known_devices.read().unwrap();
+    
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
     loop {
@@ -101,8 +102,6 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
         let current_device_id = DeviceId.clone();
         match serde_json::from_str::<DiscoveryMessage>(&message_str) {
             Ok(msg) => {
-                let known_devices = query_known_devices(&device_manager_tx).await;
-
                 let remote_addr = msg
                     .internal_ip
                     .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {

@@ -72,9 +72,7 @@ impl ChallengeManager {
 pub async fn challenge_manager_listener_run() {
     println!("[CHALLENGE MANAGER] Starting...");
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
-
-    let _challenges_cleanup = Arc::clone(&challenge_manager);
-
+    
     println!("[CHALLENGE MANAGER] Started.");
 
     let main = tokio::spawn(async move {
@@ -87,6 +85,7 @@ pub async fn challenge_manager_listener_run() {
                     if manager_lck.current_challenges.contains_key(&device_id) {
                         generate_challenge(device_id).await;
                     }
+                    drop(manager_lck)
                 }
             }
         }
