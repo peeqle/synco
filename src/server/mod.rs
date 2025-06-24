@@ -1,14 +1,16 @@
+use crate::NetError;
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
-use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der, DEVICE_SIGNING_KEY};
+use crate::keychain::{
+    DEVICE_SIGNING_KEY, generate_server_ca_keys, load_cert_der, load_private_key_der,
+};
 use crate::machine_utils::get_local_ip;
 use crate::server::ConnectionRequestQuery::ChallengeRequest;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
-use crate::NetError;
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig};
+use rustls::{ServerConfig, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,7 +25,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
@@ -160,10 +162,9 @@ impl TcpServer {
             socket.readable().await?;
             let sender_clone = Arc::clone(&some);
             let connected_devices_clone_arc = Arc::clone(&self.connected_devices);
-            let 
-            
+
             let peer_arc = Arc::new(peer_addr);
-            
+
             tokio::spawn(async move {
                 match acceptor.accept(socket).await {
                     Ok(tls_stream) => {
@@ -172,8 +173,8 @@ impl TcpServer {
                         {
                             let cn_lock = connected_devices_clone_arc.lock().await;
 
+                            //todo generate challenge
                             if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
-                                &self.generate_device_handshake_challenge()
                                 return;
                             }
                         }
@@ -213,19 +214,23 @@ impl TcpServer {
         }
     }
 
-    pub async fn generate_device_handshake_challenge(&self, device_id: String, passphrase_hash: Vec<u8>) {
+    pub async fn generate_device_handshake_challenge(
+        &self,
+        device_id: String,
+        passphrase_hash: Vec<u8>,
+    ) {
         let nonce = Uuid::new_v4();
         let device_pk = DEVICE_SIGNING_KEY.clone();
 
-        let encoded_nonce = device_pk.sign(nonce
-            .as_bytes().as_slice());
-        &self.get_channel_sender()
-            .send(
-                ChallengeRequest {
-                    device_id,
-                    nonce: encoded_nonce.to_vec(),
-                    passphrase_hash,
-                }).await;
+        let encoded_nonce = device_pk.sign(nonce.as_bytes().as_slice());
+        &self
+            .get_channel_sender()
+            .send(ChallengeRequest {
+                device_id,
+                nonce: encoded_nonce.to_vec(),
+                passphrase_hash,
+            })
+            .await;
     }
 
     pub fn get_channel_sender(&self) -> Sender<ConnectionRequestQuery> {

@@ -40,7 +40,7 @@ const CLEANUP_DELAY: u64 = 15;
 const MAX_DEAD: u64 = 60 * 5;
 
 impl DeviceManager {
-    pub async fn start() {
+    pub async fn start(&self) {
         tokio::try_join!(tokio::spawn(cleanup()), tokio::spawn(run()));
     }
     pub fn get_known_devices(&self) -> Arc<&RwLock<HashMap<String, DiscoveredDevice>>> {

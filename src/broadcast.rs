@@ -6,11 +6,11 @@ use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
+use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::Sender;
 use tokio::time::{Instant, sleep};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 // Device B receives the Response, computes the same hash using its knowledge of the passphrase and the nonce it sent, and compares it to Device A's response.
 // If hashes match, Device B authenticates Device A.
 
-pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Result<(), NetError> {
+pub async fn start_listener() -> Result<(), NetError> {
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
     println!("Broadcast listener started on {}", listen_addr);
@@ -92,8 +92,8 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
     let mut buf = vec![0u8; 1024];
 
     let device_manager_arc = Arc::clone(&DefaultDeviceManager);
-    let known_devices = &device_manager_arc.known_devices.read().unwrap();
-    
+    let device_manager_sender = device_manager_arc.get_channel_sender();
+
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
     loop {
@@ -113,7 +113,13 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
                     device_id(),
                     current_device_id
                 );
+
                 if msg.device_id != current_device_id {
+                    let known_devices = {
+                        let read_guard = device_manager_arc.known_devices.read().unwrap();
+                        read_guard.clone()
+                    };
+
                     if !(known_devices.contains_key(&current_device_id)
                         && known_devices
                             .get(&current_device_id)
@@ -137,7 +143,7 @@ pub async fn start_listener(device_manager_tx: Sender<DeviceManagerQuery>) -> Re
                                 .await?;
                         }
                     }
-                    device_manager_tx
+                    device_manager_sender
                         .send(DeviceManagerQuery::DiscoveredDevice {
                             device_id: msg.device_id.clone(),
                             socket_addr: remote_addr,
