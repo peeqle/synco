@@ -2,13 +2,14 @@ use crate::consts::CHALLENGE_DEATH;
 use crate::keychain;
 use crate::server::{ConnectionRequestQuery, DefaultServer};
 use lazy_static::lazy_static;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
-use tokio::time::{Instant, sleep};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
 lazy_static! {
@@ -68,15 +69,15 @@ impl ChallengeManager {
     }
 }
 pub async fn challenge_manager_listener_run() {
-    println!("[CHALLENGE MANAGER] Starting...");
+    debug!("[CHALLENGE MANAGER] Starting...");
     let manager_arc = Arc::clone(&DefaultChallengeManager);
 
-    let mut receiver = {
-        let mut mgr = manager_arc.lock().await;
+    let receiver = {
+        let mgr = manager_arc.lock().await;
         mgr.get_receiver().clone()
     };
 
-    println!("[CHALLENGE MANAGER] Started.");
+    debug!("[CHALLENGE MANAGER] Started.");
     loop {
         let mut receiver_guard = receiver.lock().await;
 
@@ -99,7 +100,7 @@ pub async fn challenge_manager_listener_run() {
                 }
             }
             None => {
-                println!("[CHALLENGE MANAGER] Channel closed.");
+                debug!("[CHALLENGE MANAGER] Channel closed.");
                 break;
             }
         }
@@ -121,7 +122,7 @@ pub async fn cleanup() {
                     ttl, socket_addr, ..
                 } => {
                     if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
-                        println!(
+                        debug!(
                             "[CLEANUP] Device {} challenge expired. Transitioning to Closed.",
                             device_id
                         );
@@ -133,16 +134,16 @@ pub async fn cleanup() {
                     true
                 }
                 DeviceChallengeStatus::Closed { .. } => {
-                    println!(
+                    debug!(
                         "[CLEANUP] Removing already Closed challenge for device {}.",
                         device_id
                     );
                     false
                 }
             });
-
-        println!("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX - Cleanup loop end");
-        sleep(Duration::from_secs(1)).await;
+        
+        debug!("[CONNECTION] Cleanup finished");
+        sleep(Duration::from_secs(10)).await;
     }
 }
 
@@ -154,7 +155,7 @@ pub async fn generate_challenge(device_id: String) {
     //connect if OK
 
     //generate nonce
-    println!("Generating a challenge for: {}", device_id);
+    debug!("Generating a challenge for: {}", device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
     let signed = keychain::sign(nonce_uuid_hash.to_string())
         .expect("[CONNECTION] Somehow signing issues occurred ;(");
@@ -169,5 +170,5 @@ pub async fn generate_challenge(device_id: String) {
         })
         .await
         .expect(format!("Cannot generate new challenge for: {}", device_id).as_str());
-    println!("Finished challenge generation for: {}", device_id);
+    debug!("Finished challenge generation for: {}", device_id);
 }

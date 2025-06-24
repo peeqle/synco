@@ -1,14 +1,14 @@
-use std::error::Error;
-use std::ops::Deref;
-use std::sync::Arc;
-use std::time::Duration;
-
 use crate::connection::challenge_manager_listener_run;
-use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
+use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
 use crate::server::DefaultServer;
 use crate::state::InternalState;
+use std::error::Error;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::Duration;
+use log::info;
 use tokio::time::sleep;
 
 mod balancer;
@@ -28,13 +28,14 @@ type NetError = Box<dyn Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> Result<(), NetError> {
+    env_logger::init();
     let internal_state = InternalState::new().with_passphrase("bonkers".to_string());
 
     let local_ip = get_local_ip().expect("Could not determine local IP address");
 
-    println!("My Device ID: {}", &DeviceId[..]);
-    println!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
-    println!("My Local IP: {}", local_ip);
+    info!("My Device ID: {}", &DeviceId[..]);
+    info!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
+    info!("My Local IP: {}", local_ip);
 
     let device_manager_arc = Arc::clone(&DefaultDeviceManager);
     let default_server = Arc::clone(&DefaultServer);
@@ -64,7 +65,7 @@ async fn main() -> Result<(), NetError> {
     tokio::spawn(async move {
         connection::cleanup().await;
     });
-    
+
     tokio::try_join!(
         tokio::spawn(broadcast::start_broadcast_announcer(
             DEFAULT_LISTENING_PORT,

@@ -8,6 +8,7 @@ use crate::server::ConnectionRequestQuery::ChallengeRequest;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
+use log::debug;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
 use rustls::{ServerConfig, crypto};
@@ -198,7 +199,7 @@ impl TcpServer {
                                     sender_clone.send(query).await.unwrap();
                                 }
                                 Err(err) => {
-                                    println!(
+                                    debug!(
                                         "[SERVER] Error occurred while processing client's message: {}",
                                         err
                                     )

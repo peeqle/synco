@@ -21,6 +21,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{error, fs, io};
+use log::{debug, error, info};
 
 lazy_static! {
     pub static ref DEVICE_SIGNING_KEY: Arc<SigningKey> = {
@@ -41,7 +42,7 @@ pub fn sign(msg: String) -> Result<Signature, Box<dyn Error + Send + Sync>> {
 }
 
 pub fn generate_server_ca_keys() -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
-    println!("Generating new CA certificate for server operations...");
+    info!("Generating new CA certificate for server operations...");
 
     let mut ca_params = CertificateParams::new(vec![])?;
     ca_params.distinguished_name = DistinguishedName::new();
@@ -78,8 +79,8 @@ pub fn generate_server_ca_keys() -> Result<(PathBuf, PathBuf), Box<dyn Error + S
     fs::write(&ca_cert_path, ca_cert_pem.as_bytes())?;
     fs::write(&ca_key_path, ca_private_key_pem.as_bytes())?;
 
-    println!("Root CA generated and saved at: {}", ca_cert_path.display());
-    println!("Main CA generated and saved at: {}", ca_key_path.display());
+    info!("Root CA generated and saved at: {}", ca_cert_path.display());
+    info!("Main CA generated and saved at: {}", ca_key_path.display());
 
     Ok((ca_cert_path, ca_key_path))
 }
@@ -101,7 +102,7 @@ fn load_signing_key_or_create() -> Result<SigningKey, Box<dyn Error + Send + Syn
         }
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
-                println!("Signing key file not found. Generating new keychain...");
+                debug!("Signing key file not found. Generating new keychain...");
                 generate_new_keychain()?;
                 load_signing_key_or_create()
             } else {
@@ -121,7 +122,7 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
     let key_file_path = app_data_dir.join(SIGNING_KEY);
     let mut file = File::create(&key_file_path)?;
     file.write_all(&private_key_bytes)?;
-    println!(
+    info!(
         "Private key stored in plaintext: {}",
         key_file_path.display()
     );
@@ -214,12 +215,12 @@ fn load_server_cert(called_within: bool) -> io::Result<Certificate> {
                 if called_within {
                     return Err(err);
                 }
-                println!("Creating certificates...");
+                info!("Creating certificates...");
                 generate_cert_keys().unwrap();
                 load_server_cert(true)
             }
             ErrorKind::PermissionDenied => {
-                eprintln!(
+                error!(
                     "[KEYS] Cannot generate keys for the server startup, generate them at: /keys..."
                 );
                 Err(err)
@@ -245,12 +246,12 @@ fn load_server_private_key(called_within: bool) -> io::Result<KeyPair> {
                 if called_within {
                     return Err(err);
                 }
-                println!("Creating certificates...");
+                info!("Creating certificates...");
                 generate_cert_keys().unwrap();
                 load_server_private_key(true)
             }
             ErrorKind::PermissionDenied => {
-                eprintln!(
+                error!(
                     "[KEYS] Cannot generate keys for the server startup, generate them at: /keys..."
                 );
                 Err(err)
