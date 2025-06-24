@@ -22,7 +22,7 @@ pub struct ChallengeManager {
     //device_id -> _, nonce hash, ttl
     current_challenges: HashMap<String, DeviceChallengeStatus>,
     //receiver for emitted connection event
-    bounded_channel: (Sender<ChallengeEvent>, Receiver<ChallengeEvent>),
+    bounded_channel: (Sender<ChallengeEvent>, Arc<Mutex<Receiver<ChallengeEvent>>>),
 }
 
 pub enum ChallengeEvent {
@@ -55,7 +55,7 @@ impl ChallengeManager {
     ) -> ChallengeManager {
         ChallengeManager {
             current_challenges: HashMap::new(),
-            bounded_channel,
+            bounded_channel: (bounded_channel.0, Arc::new(Mutex::new(bounded_channel.1))),
         }
     }
 
@@ -63,37 +63,45 @@ impl ChallengeManager {
         self.bounded_channel.0.clone()
     }
 
-    fn get_receiver(&mut self) -> &mut Receiver<ChallengeEvent> {
-        &mut self.bounded_channel.1
+    fn get_receiver(&self) -> Arc<Mutex<Receiver<ChallengeEvent>>> {
+        Arc::clone(&self.bounded_channel.1)
     }
 }
-
-//runs challenge for a device and connects sessions
 pub async fn challenge_manager_listener_run() {
     println!("[CHALLENGE MANAGER] Starting...");
-    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+    let manager_arc = Arc::clone(&DefaultChallengeManager);
+
+    let mut receiver = {
+        let mut mgr = manager_arc.lock().await;
+        mgr.get_receiver().clone()
+    };
 
     println!("[CHALLENGE MANAGER] Started.");
-
     loop {
-        let mut manager_lck = challenge_manager.lock().await;
-        let event_option = manager_lck.get_receiver().recv().await;
-        drop(manager_lck);
+        let mut receiver_guard = receiver.lock().await;
 
-        match event_option {
-            None => {}
-            Some(event) => match event {
-                ChallengeEvent::NewDevice { device_id } => {
-                    let challenge_exists = {
-                        let temp_manager_lck = challenge_manager.lock().await;
-                        temp_manager_lck.current_challenges.contains_key(&device_id)
-                    };
-                    if challenge_exists {
-                        generate_challenge(device_id).await;
+        match receiver_guard.recv().await {
+            Some(event) => {
+                drop(receiver_guard);
+                match event {
+                    ChallengeEvent::NewDevice { device_id } => {
+                        let exists = {
+                            let mgr = manager_arc.lock().await;
+                            mgr.current_challenges.contains_key(&device_id)
+                        };
+                        if exists {
+                            generate_challenge(device_id).await;
+                        }
+                    }
+                    ChallengeEvent::ChallengeVerification { .. } => {
+                        // handle verification
                     }
                 }
-                ChallengeEvent::ChallengeVerification { .. } => {}
-            },
+            }
+            None => {
+                println!("[CHALLENGE MANAGER] Channel closed.");
+                break;
+            }
         }
     }
 }
@@ -104,39 +112,37 @@ pub async fn cleanup() {
         let now = Instant::now();
         let mut challenges_to_notify_closed: Vec<String> = Vec::new();
 
-        {
-            let mut ch_locked = challenges_arc_clone.lock().await;
+        let mut ch_locked = challenges_arc_clone.lock().await;
 
-            ch_locked
-                .current_challenges
-                .retain(|device_id, status| match status {
-                    DeviceChallengeStatus::Active {
-                        ttl, socket_addr, ..
-                    } => {
-                        if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
-                            println!(
-                                "[CLEANUP] Device {} challenge expired. Transitioning to Closed.",
-                                device_id
-                            );
-                            *status = DeviceChallengeStatus::Closed {
-                                socket_addr: *socket_addr,
-                            };
-                            challenges_to_notify_closed.push(device_id.clone());
-                        }
-                        true
-                    }
-                    DeviceChallengeStatus::Closed { .. } => {
+        ch_locked
+            .current_challenges
+            .retain(|device_id, status| match status {
+                DeviceChallengeStatus::Active {
+                    ttl, socket_addr, ..
+                } => {
+                    if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
                         println!(
-                            "[CLEANUP] Removing already Closed challenge for device {}.",
+                            "[CLEANUP] Device {} challenge expired. Transitioning to Closed.",
                             device_id
                         );
-                        false
+                        *status = DeviceChallengeStatus::Closed {
+                            socket_addr: *socket_addr,
+                        };
+                        challenges_to_notify_closed.push(device_id.clone());
                     }
-                });
-        }
+                    true
+                }
+                DeviceChallengeStatus::Closed { .. } => {
+                    println!(
+                        "[CLEANUP] Removing already Closed challenge for device {}.",
+                        device_id
+                    );
+                    false
+                }
+            });
 
         println!("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX - Cleanup loop end");
-        // sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(1)).await;
     }
 }
 
