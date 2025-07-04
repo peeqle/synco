@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, Instant};
+use tokio::sync::{Mutex, mpsc};
+use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 lazy_static! {
@@ -141,13 +141,13 @@ pub async fn cleanup() {
                     false
                 }
             });
-        
+
         debug!("[CONNECTION] Cleanup finished");
         sleep(Duration::from_secs(10)).await;
     }
 }
 
-pub async fn generate_challenge(device_id: String) {
+pub fn generate_challenge(device_id: String) -> ConnectionRequestQuery {
     //create TCP/TLS session(server)
     //send nonce encoded in BLAKE3 crypt with ed25519
     //receive N2 hased with passphrase
@@ -160,15 +160,10 @@ pub async fn generate_challenge(device_id: String) {
     let signed = keychain::sign(nonce_uuid_hash.to_string())
         .expect("[CONNECTION] Somehow signing issues occurred ;(");
 
-    DefaultServer
-        .get_channel_sender()
-        .send(ConnectionRequestQuery::ChallengeRequest {
-            device_id: String::from(&device_id),
-            nonce: signed.to_vec(),
-            //todo make passphrase configurable
-            passphrase_hash: blake3::hash(b"key").as_bytes().to_vec(),
-        })
-        .await
-        .expect(format!("Cannot generate new challenge for: {}", device_id).as_str());
-    debug!("Finished challenge generation for: {}", device_id);
+    ConnectionRequestQuery::ChallengeRequest {
+        device_id: String::from(&device_id),
+        nonce: signed.to_vec(),
+        //todo make passphrase configurable
+        passphrase_hash: blake3::hash(b"key").as_bytes().to_vec(),
+    }
 }

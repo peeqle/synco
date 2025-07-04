@@ -1,5 +1,6 @@
 use crate::broadcast::DiscoveredDevice;
 use lazy_static::lazy_static;
+use log::debug;
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -108,6 +109,7 @@ pub async fn cleanup() {
                 return false;
             }
             true
-        })
+        });
+        debug!("[DEVICE MANAGER] Cleanup finished.")
     }
 }
