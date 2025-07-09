@@ -1,13 +1,24 @@
+use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
 use crate::keychain;
-use crate::server::{ConnectionRequestQuery, DefaultServer};
+use crate::server::ConnectionRequestQuery;
+use DeviceChallengeStatus::Active;
+use aes_gcm::aead::rand_core::RngCore;
+use aes_gcm::aead::{Aead, OsRng};
+use aes_gcm::aes::Aes128;
+use aes_gcm::{Aes128Gcm, Error, KeyInit, Nonce};
 use lazy_static::lazy_static;
+use log::{debug, info};
+use rustls::compress::default_cert_compressors;
+use std::any::Any;
 use std::collections::HashMap;
+use std::io::Read;
 use std::net::SocketAddr;
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
@@ -17,6 +28,8 @@ lazy_static! {
         Arc::new(Mutex::new(Box::new(ChallengeManager::new(channel))))
     };
 }
+
+const AES_KEY_SIZE: usize = 32;
 
 pub struct ChallengeManager {
     //device_id -> _, nonce hash, ttl
@@ -38,9 +51,9 @@ pub enum ChallengeEvent {
 pub enum DeviceChallengeStatus {
     Active {
         socket_addr: SocketAddr,
-        nonce: String,
-        nonce_hash: String,
-        passphrase: String,
+        nonce: Vec<u8>,
+        nonce_hash: Vec<u8>,
+        passphrase: Vec<u8>,
         attempts: i16,
         ttl: Instant,
     },
@@ -68,36 +81,6 @@ impl ChallengeManager {
     }
 }
 
-//runs challenge for a device and connects sessions
-pub async fn challenge_manager_listener_run() {
-    println!("[CHALLENGE MANAGER] Starting...");
-    let challenge_manager = Arc::clone(&DefaultChallengeManager);
-
-    println!("[CHALLENGE MANAGER] Started.");
-
-    loop {
-        let mut manager_lck = challenge_manager.lock().await;
-        let event_option = manager_lck.get_receiver().recv().await;
-        drop(manager_lck);
-
-        match event_option {
-            None => {}
-            Some(event) => match event {
-                ChallengeEvent::NewDevice { device_id } => {
-                    let challenge_exists = {
-                        let temp_manager_lck = challenge_manager.lock().await;
-                        temp_manager_lck.current_challenges.contains_key(&device_id)
-                    };
-                    if challenge_exists {
-                        generate_challenge(device_id).await;
-                    }
-                }
-                ChallengeEvent::ChallengeVerification { .. } => {}
-            },
-        }
-    }
-}
-
 pub async fn cleanup() {
     let challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
     loop {
@@ -110,7 +93,7 @@ pub async fn cleanup() {
             ch_locked
                 .current_challenges
                 .retain(|device_id, status| match status {
-                    DeviceChallengeStatus::Active {
+                    Active {
                         ttl, socket_addr, ..
                     } => {
                         if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
@@ -134,34 +117,110 @@ pub async fn cleanup() {
                     }
                 });
         }
-
-        println!("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX - Cleanup loop end");
-        // sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(15)).await;
     }
 }
 
-pub async fn generate_challenge(device_id: String) {
-    //create TCP/TLS session(server)
-    //send nonce encoded in BLAKE3 crypt with ed25519
-    //receive N2 hased with passphrase
-    //dehash by passphrase and check validity of hash of nonce
-    //connect if OK
-
-    //generate nonce
-    println!("Generating a challenge for: {}", device_id);
+pub async fn generate_challenge(device: &DiscoveredDevice) -> ConnectionRequestQuery {
+    debug!("Generating a challenge for: {}", device.device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
     let signed = keychain::sign(nonce_uuid_hash.to_string())
         .expect("[CONNECTION] Somehow signing issues occurred ;(");
 
-    DefaultServer
-        .get_channel_sender()
-        .send(ConnectionRequestQuery::ChallengeRequest {
-            device_id: String::from(&device_id),
-            nonce: signed.to_vec(),
-            //todo make passphrase configurable
-            passphrase_hash: blake3::hash(b"key").as_bytes().to_vec(),
-        })
-        .await
-        .expect(format!("Cannot generate new challenge for: {}", device_id).as_str());
-    println!("Finished challenge generation for: {}", device_id);
+    {
+        let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
+
+        let mut lck = default_challenge_manager_arc.lock().await;
+
+        lck.current_challenges.insert(
+            device.device_id.clone(),
+            Active {
+                socket_addr: device.connect_addr,
+                nonce: signed.to_vec(),
+                nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
+                passphrase: blake3::hash(b"key").as_bytes().to_vec(),
+                attempts: 3,
+                ttl: Instant::now().add(Duration::from_secs(60 * 5)),
+            },
+        );
+    }
+
+    ConnectionRequestQuery::ChallengeRequest {
+        device_id: device.device_id.clone(),
+        nonce: signed.to_vec(),
+    }
+}
+
+pub fn encrypt_with_passphrase(
+    nonce_hash: &[u8],
+    passphrase: &[u8; AES_KEY_SIZE],
+) -> Result<(Vec<u8>, [u8; 12]), aes_gcm::Error> {
+    let cipher = Aes128Gcm::new_from_slice(passphrase).map_err(|_| aes_gcm::Error)?;
+
+    let mut iv_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut iv_bytes);
+    let nonce = Nonce::from_slice(&iv_bytes);
+
+    let ciphertext_with_tag = cipher.encrypt(nonce, nonce_hash)?;
+    Ok((ciphertext_with_tag, iv_bytes))
+}
+
+pub fn decrypt_with_passphrase(
+    passphrase: &[u8; 32],
+    iv_bytes: &[u8; 12],
+    ciphertext_with_tag: &[u8],
+) -> Result<Vec<u8>, aes_gcm::Error> {
+    let cipher = Aes128Gcm::new_from_slice(passphrase).map_err(|_| aes_gcm::Error)?;
+    let nonce = Nonce::from_slice(iv_bytes);
+
+    cipher.decrypt(nonce, ciphertext_with_tag)
+}
+
+pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[u8]) -> bool {
+    let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
+
+    let mut lck = default_challenge_manager_arc.lock().await;
+    let current_device_challenge = lck.current_challenges.get_mut(&_device.device_id);
+
+    if let Some(device) = current_device_challenge {
+        match device {
+            Active {
+                socket_addr,
+                nonce,
+                nonce_hash,
+                passphrase,
+                attempts,
+                ttl,
+            } => {
+                if *attempts <= 0 {
+                    debug!("User cannot connect due to retries fall");
+                } else {
+                    let mut passphrase_array: [u8; 32] = [0; 32];
+                    passphrase_array.copy_from_slice(&passphrase);
+
+                    let mut nonce_array: [u8; 12] = [0; 12];
+                    nonce_array.copy_from_slice(&nonce_hash);
+
+                    match decrypt_with_passphrase(
+                        &passphrase_array,
+                        &nonce_array,
+                        encoded_passphrase,
+                    ) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            
+                            info!(
+                                "User {} tried to connect but failed with passphrase {}",
+                                _device.connect_addr.ip().to_string(),
+                                String::from_utf8_lossy(&passphrase_array)
+                            )
+                        }
+                    };
+                }
+            }
+            DeviceChallengeStatus::Closed { .. } => {}
+        }
+    };
+
+    return false;
 }

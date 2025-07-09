@@ -68,8 +68,7 @@ async fn main() -> Result<(), NetError> {
         tokio::spawn(broadcast::start_listener()),
         tokio::spawn(async move { default_server.start().await }),
         tokio::spawn(async move { device_manager_arc_for_join.start().await }),
-        tokio::spawn(challenge_manager_listener_run()),
-        tokio::spawn(connection::cleanup()),
+        tokio::spawn(cleanup()),
         known_devices_printer_handle
     );
 

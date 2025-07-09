@@ -20,6 +20,7 @@ lazy_static! {
 }
 
 pub struct DeviceManager {
+                                            //id
     pub(crate) known_devices: RwLock<HashMap<String, DiscoveredDevice>>,
     pub(crate) bounded_channel: (
         Sender<DeviceManagerQuery>,

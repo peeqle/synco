@@ -1,5 +1,8 @@
 use crate::NetError;
+use crate::broadcast::DiscoveredDevice;
+use crate::connection::generate_challenge;
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
+use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::{
     DEVICE_SIGNING_KEY, generate_server_ca_keys, load_cert_der, load_private_key_der,
 };
@@ -8,6 +11,7 @@ use crate::server::ConnectionRequestQuery::ChallengeRequest;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
+use log::info;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
 use rustls::{ServerConfig, crypto};
@@ -18,7 +22,7 @@ use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::io;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -83,7 +87,6 @@ pub enum ConnectionRequestQuery {
     ChallengeRequest {
         device_id: String,
         nonce: Vec<u8>,
-        passphrase_hash: Vec<u8>,
     },
     ChallengeResponse {
         device_id: String,
@@ -162,6 +165,7 @@ impl TcpServer {
             socket.readable().await?;
             let sender_clone = Arc::clone(&some);
             let connected_devices_clone_arc = Arc::clone(&self.connected_devices);
+            let discovered_devices = Arc::clone(&DefaultDeviceManager);
 
             let peer_arc = Arc::new(peer_addr);
 
@@ -172,10 +176,34 @@ impl TcpServer {
 
                         {
                             let cn_lock = connected_devices_clone_arc.lock().await;
+                            let discovered_devices =
+                                discovered_devices.known_devices.read().expect(
+                                    "Cannot find suitable known devices holder in devices manager",
+                                );
 
-                            //todo generate challenge
-                            if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
+                            let connecting_device: Option<(&String, DiscoveredDevice)> =
+                                discovered_devices
+                                    .iter()
+                                    .filter(|(id, device)| {
+                                        device.connect_addr.ip().eq(&peer_arc.ip())
+                                    })
+                                    .map(|(id, device)| (id, device.clone()))
+                                    .last();
+
+                            if !connecting_device.is_some() {
+                                info!(
+                                    "Cannot identify device of IP {}",
+                                    peer_addr.ip().to_string()
+                                );
+                                
                                 return;
+                            } else if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
+                                let device = connecting_device.unwrap();
+                                let challenge_body = generate_challenge(device.0.clone());
+                                
+                                //serialize challenge
+                                writer.writer().write_all()
+                                
                             }
                         }
 

@@ -35,7 +35,6 @@ lazy_static! {
 
 pub fn sign(msg: String) -> Result<Signature, Box<dyn Error + Send + Sync>> {
     let cp = Arc::clone(&DEVICE_SIGNING_KEY);
-
     cp.try_sign(msg.as_bytes())
         .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
 }
