@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::connection::{challenge_manager_listener_run, cleanup};
+use crate::connection::cleanup;
 use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
@@ -40,8 +40,8 @@ async fn main() -> Result<(), NetError> {
     let default_server = Arc::clone(&DefaultServer);
     let dv_cp = device_manager_arc.clone();
     let device_manager_arc_for_join = device_manager_arc.clone();
-    
-    let known_devices_printer_handle =tokio::spawn(async move {
+
+    let known_devices_printer_handle = tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(15)).await;
 

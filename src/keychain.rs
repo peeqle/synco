@@ -1,7 +1,4 @@
-use crate::consts::{
-    CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, DeviceId, PRIVATE_KEY_FILE_NAME,
-    SIGNING_KEY,
-};
+use crate::consts::{DeviceId, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use base32::Alphabet;
 use der::pem::LineEnding;
@@ -115,7 +112,7 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
     let private_key_bytes = signing_key.to_bytes();
 
-    let mut app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir();
 
     let key_file_path = app_data_dir.join(SIGNING_KEY);
     let mut file = File::create(&key_file_path)?;

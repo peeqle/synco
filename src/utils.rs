@@ -1,10 +1,17 @@
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use rustls::RootCertStore;
-use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::{fs, io};
+
+pub mod control {
+    use std::error::Error;
+
+    pub trait ConnectionStatusVerification {
+        fn verify_self(&self) -> Result<bool, Box<dyn Error>>;
+    }
+}
 
 pub fn get_default_application_dir() -> PathBuf {
     let mut app_data_dir = dirs::data_dir()
@@ -32,7 +39,7 @@ pub fn get_default_application_dir() -> PathBuf {
     app_data_dir
 }
 
-pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<io::Error> > {
+pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<io::Error>> {
     if !fs::exists(path.as_ref())? {
         return Err(Box::new(io::Error::new(
             ErrorKind::NotFound,

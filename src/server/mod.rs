@@ -171,67 +171,75 @@ impl TcpServer {
 
             tokio::spawn(async move {
                 match acceptor.accept(socket).await {
-                    Ok(tls_stream) => {
-                        let (reader, writer) = tls_stream.get_ref();
+                    Ok(mut tls_stream) => {
+                        let (reader, mut writer) = tls_stream.get_mut();
 
                         {
                             let cn_lock = connected_devices_clone_arc.lock().await;
-                            let discovered_devices =
-                                discovered_devices.known_devices.read().expect(
-                                    "Cannot find suitable known devices holder in devices manager",
-                                );
+                            let connecting_device_option: Option<DiscoveredDevice> = {
+                                let discovered_devices_guard =
+                                    discovered_devices.known_devices.read().expect(
+                                        "Cannot find suitable known devices holder in devices manager",
+                                    );
 
-                            let connecting_device: Option<(&String, DiscoveredDevice)> =
-                                discovered_devices
+                                discovered_devices_guard
                                     .iter()
                                     .filter(|(id, device)| {
                                         device.connect_addr.ip().eq(&peer_arc.ip())
                                     })
-                                    .map(|(id, device)| (id, device.clone()))
-                                    .last();
+                                    .map(|(id, device)| device.clone())
+                                    .last()
+                            };
 
-                            if !connecting_device.is_some() {
+                            if !connecting_device_option.is_some() {
                                 info!(
                                     "Cannot identify device of IP {}",
                                     peer_addr.ip().to_string()
                                 );
-                                
                                 return;
                             } else if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
-                                let device = connecting_device.unwrap();
-                                let challenge_body = generate_challenge(device.0.clone());
-                                
-                                //serialize challenge
-                                writer.writer().write_all()
-                                
-                            }
-                        }
-
-                        let mut buffer = vec![0; 4096];
-                        let mut result = vec![];
-
-                        loop {
-                            let bytes_read = reader.try_read(&mut buffer).unwrap();
-                            if bytes_read == 0 {
-                                break;
-                            }
-                            result.extend_from_slice(&buffer[..bytes_read]);
-                        }
-
-                        if !result.is_empty() {
-                            match serde_json::from_slice::<ConnectionRequestQuery>(
-                                result.as_slice(),
-                            ) {
-                                Ok(query) => {
-                                    sender_clone.send(query).await.unwrap();
+                                let device = connecting_device_option.unwrap();
+                                if let Ok(ser) = get_serialized_challenge(device.clone()).await {
+                                    if let Err(e) = writer.writer().write_all(&ser) {
+                                        eprintln!("Failed to write challenge: {}", e);
+                                    }
+                                } else {
+                                    eprintln!("Failed to serialize challenge.");
                                 }
-                                Err(err) => {
-                                    println!(
-                                        "[SERVER] Error occurred while processing client's message: {}",
-                                        err
-                                    )
+                            } else {
+                                let mut buffer = vec![0; 4096];
+                                let mut result = vec![];
+
+                                loop {
+                                    let bytes_read = reader.try_read(&mut buffer).unwrap();
+                                    if bytes_read == 0 {
+                                        break;
+                                    }
+                                    result.extend_from_slice(&buffer[..bytes_read]);
                                 }
-                            };
+
+                                if !result.is_empty() {
+                                    match serde_json::from_slice::<ConnectionRequestQuery>(
+                                        result.as_slice(),
+                                    ) {
+                                        Ok(query) => match query {
+                                            ConnectionRequestQuery::InitialRequest { .. } => {}
+                                            ConnectionRequestQuery::ChallengeRequest { .. } => {}
+                                            ConnectionRequestQuery::ChallengeResponse {
+                                                ..
+                                            } => {}
+                                            ConnectionRequestQuery::AcceptConnection(_) => {}
+                                            ConnectionRequestQuery::RejectConnection(_) => {}
+                                        },
+                                        Err(err) => {
+                                            println!(
+                                                "[SERVER] Error occurred while processing client's message: {}",
+                                                err
+                                            )
+                                        }
+                                    };
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -240,13 +248,17 @@ impl TcpServer {
                 }
             });
         }
+
+        async fn get_serialized_challenge(
+            device: DiscoveredDevice,
+        ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+            let challenge_query = generate_challenge(&device).await?;
+            let serialized = serde_json::to_vec(&challenge_query)?;
+            Ok(serialized)
+        }
     }
 
-    pub async fn generate_device_handshake_challenge(
-        &self,
-        device_id: String,
-        passphrase_hash: Vec<u8>,
-    ) {
+    pub async fn generate_device_handshake_challenge(&self, device_id: String) {
         let nonce = Uuid::new_v4();
         let device_pk = DEVICE_SIGNING_KEY.clone();
 
@@ -256,7 +268,6 @@ impl TcpServer {
             .send(ChallengeRequest {
                 device_id,
                 nonce: encoded_nonce.to_vec(),
-                passphrase_hash,
             })
             .await;
     }

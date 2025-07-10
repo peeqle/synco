@@ -2,16 +2,18 @@ use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
 use crate::keychain;
 use crate::server::ConnectionRequestQuery;
+use crate::utils::control::ConnectionStatusVerification;
 use DeviceChallengeStatus::Active;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::aes::Aes128;
-use aes_gcm::{Aes128Gcm, Error, KeyInit, Nonce};
+use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use lazy_static::lazy_static;
 use log::{debug, info};
 use rustls::compress::default_cert_compressors;
 use std::any::Any;
 use std::collections::HashMap;
+use std::error::Error;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::ops::Add;
@@ -60,6 +62,32 @@ pub enum DeviceChallengeStatus {
     Closed {
         socket_addr: SocketAddr,
     },
+}
+
+//todo replace with actual errors
+impl ConnectionStatusVerification for DeviceChallengeStatus {
+    fn verify_self(&self) -> Result<bool, Box<dyn Error>> {
+        let now = Instant::now();
+        match self {
+            DeviceChallengeStatus::Active {
+                socket_addr,
+                nonce,
+                nonce_hash,
+                passphrase,
+                attempts,
+                ttl,
+            } => {
+                if now.ge(ttl) {
+                    return Ok(false);
+                }
+                if *attempts <= 0i16 {
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+            DeviceChallengeStatus::Closed { .. } => Ok(true),
+        }
+    }
 }
 
 impl ChallengeManager {
@@ -121,7 +149,11 @@ pub async fn cleanup() {
     }
 }
 
-pub async fn generate_challenge(device: &DiscoveredDevice) -> ConnectionRequestQuery {
+/**
+* Accepts device to connect and create challenge for it based on fetched hash of passphrase
+* and nonce UUID, encoded with Aes128Gcm, amounts of retries of each client is set to base 3 for handling bruteforce
+*/
+pub async fn generate_challenge(device: &DiscoveredDevice) -> Result<ConnectionRequestQuery, Box<dyn Error + Send + Sync>> {
     debug!("Generating a challenge for: {}", device.device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
     let signed = keychain::sign(nonce_uuid_hash.to_string())
@@ -131,24 +163,34 @@ pub async fn generate_challenge(device: &DiscoveredDevice) -> ConnectionRequestQ
         let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
 
         let mut lck = default_challenge_manager_arc.lock().await;
-
-        lck.current_challenges.insert(
-            device.device_id.clone(),
-            Active {
-                socket_addr: device.connect_addr,
-                nonce: signed.to_vec(),
-                nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
-                passphrase: blake3::hash(b"key").as_bytes().to_vec(),
-                attempts: 3,
-                ttl: Instant::now().add(Duration::from_secs(60 * 5)),
+        let current_device_challenge = lck.current_challenges.get(&device.device_id.clone());
+        match current_device_challenge {
+            None => {
+                lck.current_challenges.insert(
+                    device.device_id.clone(),
+                    Active {
+                        socket_addr: device.connect_addr,
+                        nonce: signed.to_vec(),
+                        nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
+                        passphrase: blake3::hash(b"key").as_bytes().to_vec(),
+                        attempts: 3,
+                        ttl: Instant::now().add(Duration::from_secs(60 * 5)),
+                    },
+                );
+            }
+            Some(device_connection_status) => match device_connection_status.verify_self() {
+                Ok(res) => {
+                    debug!("Device is trying to reconnect again");
+                }
+                Err(_) => {}
             },
-        );
+        }
     }
 
-    ConnectionRequestQuery::ChallengeRequest {
+    Ok(ConnectionRequestQuery::ChallengeRequest {
         device_id: device.device_id.clone(),
         nonce: signed.to_vec(),
-    }
+    })
 }
 
 pub fn encrypt_with_passphrase(
@@ -208,7 +250,6 @@ pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[
                     ) {
                         Ok(_) => {}
                         Err(err) => {
-                            
                             info!(
                                 "User {} tried to connect but failed with passphrase {}",
                                 _device.connect_addr.ip().to_string(),
