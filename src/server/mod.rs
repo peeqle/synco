@@ -14,7 +14,7 @@ use lazy_static::lazy_static;
 use log::info;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{ServerConfig, crypto};
+use rustls::{ServerConfig, ServerConnection, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,11 +23,11 @@ use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::io;
 use std::io::{ErrorKind, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, mpsc};
 use tokio_rustls::TlsAcceptor;
@@ -174,79 +174,78 @@ impl TcpServer {
                     Ok(mut tls_stream) => {
                         let (reader, mut writer) = tls_stream.get_mut();
 
-                        {
-                            let cn_lock = connected_devices_clone_arc.lock().await;
-                            let connecting_device_option: Option<DiscoveredDevice> = {
-                                let discovered_devices_guard =
-                                    discovered_devices.known_devices.read().expect(
-                                        "Cannot find suitable known devices holder in devices manager",
-                                    );
-
-                                discovered_devices_guard
-                                    .iter()
-                                    .filter(|(id, device)| {
-                                        device.connect_addr.ip().eq(&peer_arc.ip())
-                                    })
-                                    .map(|(id, device)| device.clone())
-                                    .last()
-                            };
-
-                            if !connecting_device_option.is_some() {
-                                info!(
-                                    "Cannot identify device of IP {}",
-                                    peer_addr.ip().to_string()
+                        let cn_lock = connected_devices_clone_arc.lock().await;
+                        let connecting_device_option: Option<DiscoveredDevice> = {
+                            let discovered_devices_guard =
+                                discovered_devices.known_devices.read().expect(
+                                    "Cannot find suitable known devices holder in devices manager",
                                 );
-                                return;
-                            } else if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
-                                let device = connecting_device_option.unwrap();
-                                if let Ok(ser) = get_serialized_challenge(device.clone()).await {
-                                    if let Err(e) = writer.writer().write_all(&ser) {
-                                        eprintln!("Failed to write challenge: {}", e);
-                                    }
-                                } else {
-                                    eprintln!("Failed to serialize challenge.");
-                                }
-                            } else {
-                                let mut buffer = vec![0; 4096];
-                                let mut result = vec![];
 
-                                loop {
-                                    let bytes_read = reader.try_read(&mut buffer).unwrap();
-                                    if bytes_read == 0 {
-                                        break;
-                                    }
-                                    result.extend_from_slice(&buffer[..bytes_read]);
-                                }
+                            discovered_devices_guard
+                                .iter()
+                                .filter(|(id, device)| device.connect_addr.ip().eq(&peer_arc.ip()))
+                                .map(|(id, device)| device.clone())
+                                .last()
+                        };
 
-                                if !result.is_empty() {
-                                    match serde_json::from_slice::<ConnectionRequestQuery>(
-                                        result.as_slice(),
-                                    ) {
-                                        Ok(query) => match query {
-                                            ConnectionRequestQuery::InitialRequest { .. } => {}
-                                            ConnectionRequestQuery::ChallengeRequest { .. } => {}
-                                            ConnectionRequestQuery::ChallengeResponse {
-                                                ..
-                                            } => {}
-                                            ConnectionRequestQuery::AcceptConnection(_) => {}
-                                            ConnectionRequestQuery::RejectConnection(_) => {}
-                                        },
-                                        Err(err) => {
-                                            println!(
-                                                "[SERVER] Error occurred while processing client's message: {}",
-                                                err
-                                            )
-                                        }
-                                    };
-                                }
-                            }
-                        }
+                        handle_client_actions(connecting_device_option, peer_arc, reader, writer, &cn_lock).await;
                     }
                     Err(e) => {
                         eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
                     }
                 }
             });
+        }
+
+        async fn handle_client_actions(
+            connecting_device_option: Option<DiscoveredDevice>,
+            peer_arc: Arc<SocketAddr>,
+            reader: &mut TcpStream,
+            writer: &mut ServerConnection,
+            cn_lock: &HashMap<String, String>,
+        ) {
+            if !connecting_device_option.is_some() {
+                info!("Cannot identify device of IP {}", peer_arc.ip().to_string());
+                return;
+            } else if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
+                let device = connecting_device_option.unwrap();
+                if let Ok(ser) = get_serialized_challenge(device.clone()).await {
+                    if let Err(e) = writer.writer().write_all(&ser) {
+                        eprintln!("Failed to write challenge: {}", e);
+                    }
+                } else {
+                    eprintln!("Failed to serialize challenge.");
+                }
+            } else {
+                let mut buffer = vec![0; 4096];
+                let mut result = vec![];
+
+                loop {
+                    let bytes_read = reader.try_read(&mut buffer).unwrap();
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    result.extend_from_slice(&buffer[..bytes_read]);
+                }
+
+                if !result.is_empty() {
+                    match serde_json::from_slice::<ConnectionRequestQuery>(result.as_slice()) {
+                        Ok(query) => match query {
+                            ConnectionRequestQuery::InitialRequest { .. } => {}
+                            ConnectionRequestQuery::ChallengeRequest { .. } => {}
+                            ConnectionRequestQuery::ChallengeResponse { .. } => {}
+                            ConnectionRequestQuery::AcceptConnection(_) => {}
+                            ConnectionRequestQuery::RejectConnection(_) => {}
+                        },
+                        Err(err) => {
+                            println!(
+                                "[SERVER] Error occurred while processing client's message: {}",
+                                err
+                            )
+                        }
+                    };
+                }
+            }
         }
 
         async fn get_serialized_challenge(
