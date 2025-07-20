@@ -113,7 +113,7 @@ pub async fn start_listener() -> Result<(), NetError> {
                     current_device_id
                 );
 
-                if msg.device_id != current_device_id {
+                // if msg.device_id != current_device_id {
                     let known_devices = {
                         let read_guard = device_manager_arc.known_devices.read().unwrap();
                         read_guard.clone()
@@ -148,7 +148,7 @@ pub async fn start_listener() -> Result<(), NetError> {
                             socket_addr: remote_addr,
                         })
                         .await?;
-                }
+                // }
             }
             Err(e) => {
                 eprintln!(
@@ -174,7 +174,7 @@ pub async fn start_broadcast_announcer(
         Some(local_ip),
         22000,
         Some(local_ip),
-        false,
+        true,
     );
     let serialized_message = serde_json::to_string(&message)?;
 

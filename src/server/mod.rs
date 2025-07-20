@@ -166,7 +166,6 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
     loop {
         let (socket, peer_addr) = listener.accept().await?;
 
-        let server_clone = server.clone();
         let acceptor_clone = acceptor.clone();
         let connected_devices_clone = connected_devices.clone();
         let default_device_manager_clone = default_device_manager.clone();
@@ -215,7 +214,7 @@ async fn handle_client_actions(
     writer: &mut ServerConnection,
     connected_devices: HashMap<String, String>,
 ) {
-    if !connecting_device_option.is_some() {
+    if connecting_device_option.is_none() {
         info!("Cannot identify device of IP {}", peer_arc.ip().to_string());
         return;
     } else if !connected_devices.contains_key(&peer_arc.ip().to_string()) {
@@ -223,6 +222,8 @@ async fn handle_client_actions(
         if let Ok(ser) = get_serialized_challenge(device.clone()).await {
             if let Err(e) = writer.writer().write_all(&ser) {
                 eprintln!("Failed to write challenge: {}", e);
+            } else {
+                println!("Sent challenge to: {}", device.device_id.to_string());
             }
         } else {
             eprintln!("Failed to serialize challenge.");
@@ -265,22 +266,4 @@ async fn get_serialized_challenge(
     let challenge_query = generate_challenge(&device).await?;
     let serialized = serde_json::to_vec(&challenge_query)?;
     Ok(serialized)
-}
-
-pub async fn generate_device_handshake_challenge(server: Arc<TcpServer>, device_id: String) {
-    let nonce = Uuid::new_v4();
-    let device_pk = DEVICE_SIGNING_KEY.clone();
-
-    let encoded_nonce = device_pk.sign(nonce.as_bytes().as_slice());
-    get_channel_sender(server)
-        .send(ChallengeRequest {
-            device_id,
-            nonce: encoded_nonce.to_vec(),
-        })
-        .await
-        .expect("Cannot create new challenge request");
-}
-
-pub fn get_channel_sender(server: Arc<TcpServer>) -> Sender<ConnectionRequestQuery> {
-    server.bounded_channel.0.clone()
 }

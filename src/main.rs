@@ -22,6 +22,7 @@ mod keychain;
 mod machine_utils;
 mod server;
 mod state;
+mod ui;
 mod utils;
 
 type NetError = Box<dyn Error + Send + Sync>;
