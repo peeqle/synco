@@ -1,6 +1,6 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::connection::DeviceChallengeStatus::Active;
-use crate::connection::{DefaultChallengeManager, DeviceChallengeStatus};
+use crate::challenge::DeviceChallengeStatus::Active;
+use crate::challenge::{DefaultChallengeManager, DeviceChallengeStatus};
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
@@ -147,8 +147,11 @@ pub fn decrypt_with_passphrase(
 pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[u8]) -> bool {
     let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
 
-    let mut lck = default_challenge_manager_arc.lock().await;
-    let current_device_challenge = lck.current_challenges.get_mut(&_device.device_id);
+    let mut lck = default_challenge_manager_arc
+        .current_challenges
+        .read()
+        .await;
+    let current_device_challenge = lck.get(&_device.device_id);
 
     if let Some(device) = current_device_challenge {
         match device {

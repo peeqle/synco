@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::connection::cleanup;
+use crate::challenge::cleanup;
 use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
@@ -13,8 +13,8 @@ use tokio::time::sleep;
 
 mod balancer;
 mod broadcast;
+mod challenge;
 mod client;
-mod connection;
 mod consts;
 mod device_manager;
 mod diff;
@@ -47,7 +47,7 @@ async fn main() -> Result<(), NetError> {
             sleep(Duration::from_secs(15)).await;
 
             let known_devices = {
-                let read_guard = dv_cp.known_devices.read().unwrap();
+                let read_guard = dv_cp.known_devices.read().await;
                 read_guard.clone()
             };
 

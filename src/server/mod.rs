@@ -1,20 +1,21 @@
-use crate::NetError;
 use crate::broadcast::DiscoveredDevice;
-use crate::connection::generate_challenge;
+use crate::challenge::generate_challenge;
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::{
-    DEVICE_SIGNING_KEY, generate_server_ca_keys, load_cert_der, load_private_key_der,
+    generate_server_ca_keys, load_cert_der, load_private_key_der, DEVICE_SIGNING_KEY,
 };
 use crate::machine_utils::get_local_ip;
 use crate::server::ConnectionRequestQuery::ChallengeRequest;
+use crate::server::ConnectionState::{Access, Denied};
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
+use crate::NetError;
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use log::info;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{ServerConfig, ServerConnection, crypto};
+use rustls::{crypto, ServerConfig, ServerConnection};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,14 +23,15 @@ use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::io;
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
+use std::ptr::write;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
@@ -38,8 +40,9 @@ mod tls_utils;
 
 lazy_static! {
     pub static ref DefaultServer: Arc<TcpServer> = {
-        let channel = mpsc::channel::<ConnectionRequestQuery>(500);
-        let tcp_server = TcpServer::new(channel).expect("Cannot create new TcpServer instance");
+        let channel = mpsc::channel::<ServerActivity>(500);
+        let tcp_server = TcpServer::new((channel.0, Mutex::new(channel.1)))
+            .expect("Cannot create new TcpServer instance");
         Arc::new(tcp_server)
     };
 }
@@ -73,11 +76,14 @@ pub struct TcpServer {
     loaded_configuration: ServerConfig,
     current_acceptor: Arc<TlsAcceptor>,
     //socket_addr to device_id
-    connected_devices: Arc<Mutex<HashMap<String, String>>>,
-    pub(crate) bounded_channel: (
-        Sender<ConnectionRequestQuery>,
-        Receiver<ConnectionRequestQuery>,
-    ),
+    connected_devices: Arc<Mutex<HashMap<String, TcpPeer>>>,
+    pub(crate) bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
+}
+
+pub struct TcpPeer {
+    device_id: String,
+    connection: ServerConnection,
+    connection_status: ConnectionState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,12 +104,22 @@ pub enum ConnectionRequestQuery {
     RejectConnection(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServerActivity {
+    SendChallenge { device_id: String },
+}
+
+#[derive(Clone, PartialEq)]
+pub enum ConnectionState {
+    Unknown,
+    Denied,
+    Access,
+    Pending,
+}
+
 impl TcpServer {
     fn new(
-        server_channel: (
-            Sender<ConnectionRequestQuery>,
-            Receiver<ConnectionRequestQuery>,
-        ),
+        server_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
     ) -> Result<TcpServer, Box<dyn Error + Send + Sync>> {
         let validation = validate_server_cert_present();
         if !validation {
@@ -160,26 +176,24 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
         TcpListener::bind(format!("{}:{}", server.local_ip, DEFAULT_SERVER_PORT)).await?;
 
     let acceptor = server.current_acceptor.clone();
-    let connected_devices = server.connected_devices.clone();
     let default_device_manager = DefaultDeviceManager.clone();
 
     loop {
         let (socket, peer_addr) = listener.accept().await?;
 
+        let server_arc = server.clone();
         let acceptor_clone = acceptor.clone();
-        let connected_devices_clone = connected_devices.clone();
         let default_device_manager_clone = default_device_manager.clone();
 
         task::spawn(async move {
             match acceptor_clone.accept(socket).await {
                 Ok(mut tls_stream) => {
-                    let (reader, mut writer) = tls_stream.get_mut();
+                    let (tcp_stream, mut connection) = tls_stream.get_mut();
 
                     let connecting_device_option: Option<DiscoveredDevice> = {
-                        let discovered_devices_guard = default_device_manager_clone
-                            .known_devices
-                            .read()
-                            .expect("Cannot obtain read permission");
+                        let discovered_devices_guard =
+                            default_device_manager_clone.known_devices.read().await;
+
                         discovered_devices_guard
                             .iter()
                             .filter(|(_id, device)| device.connect_addr.ip() == peer_addr.ip())
@@ -187,17 +201,13 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                             .last()
                     };
 
-                    {
-                        let connected_devices_lock = connected_devices_clone.lock().await.clone();
-                        handle_client_actions(
-                            connecting_device_option,
-                            peer_addr,
-                            reader,
-                            writer,
-                            connected_devices_lock,
-                        )
+                    handle_client_actions(
+                        server_arc.clone(),
+                        connecting_device_option,
+                        peer_addr,
+                        connection,
+                    )
                         .await;
-                    }
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -207,20 +217,48 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
     }
 }
 
+async fn listen_actions(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server_cp = Arc::clone(&server);
+    loop {
+        let mut receiver = server_cp.bounded_channel.1.lock().await;
+        tokio::select! {
+                Some(message) = receiver.recv() => {
+                match message{
+                            ServerActivity::SendChallenge{ device_id } => {
+                            let cp = server_cp.connected_devices.lock().await;
+                                    let _device = cp.get(&device_id);
+
+
+                                if _device.is_some() {
+                            let device_connection = _device.unwrap();
+                                        match device_connection.connection_status {
+                                            Denied => {  return Err(Box::new(io::Error::new(ErrorKind::AlreadyExists, "Connection is denied"))) }
+                                            Access => {return Err(Box::new(io::Error::new(ErrorKind::AlreadyExists, "Connection is already opened")))}
+
+                                        _ => {}}
+                                }
+                        }
+                    }
+            }
+        }
+    }
+}
+
 async fn handle_client_actions(
+    server: Arc<TcpServer>,
     connecting_device_option: Option<DiscoveredDevice>,
     peer_arc: SocketAddr,
-    reader: &mut TcpStream,
-    writer: &mut ServerConnection,
-    connected_devices: HashMap<String, String>,
+    connection: &mut ServerConnection,
 ) {
+    let arc = server.connected_devices.clone();
+    let guard = arc.lock().await;
     if connecting_device_option.is_none() {
         info!("Cannot identify device of IP {}", peer_arc.ip().to_string());
         return;
-    } else if !connected_devices.contains_key(&peer_arc.ip().to_string()) {
+    } else if !guard.contains_key(&peer_arc.ip().to_string()) {
         let device = connecting_device_option.unwrap();
         if let Ok(ser) = get_serialized_challenge(device.clone()).await {
-            if let Err(e) = writer.writer().write_all(&ser) {
+            if let Err(e) = connection.writer().write_all(&ser) {
                 eprintln!("Failed to write challenge: {}", e);
             } else {
                 println!("Sent challenge to: {}", device.device_id.to_string());
@@ -233,7 +271,7 @@ async fn handle_client_actions(
         let mut result = vec![];
 
         loop {
-            let bytes_read = reader.try_read(&mut buffer).unwrap();
+            let bytes_read = connection.reader().read(&mut buffer).unwrap();
             if bytes_read == 0 {
                 break;
             }
@@ -263,7 +301,7 @@ async fn handle_client_actions(
 async fn get_serialized_challenge(
     device: DiscoveredDevice,
 ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
-    let challenge_query = generate_challenge(&device).await?;
+    let challenge_query = generate_challenge(device.device_id.clone()).await?;
     let serialized = serde_json::to_vec(&challenge_query)?;
     Ok(serialized)
 }

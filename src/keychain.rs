@@ -1,4 +1,7 @@
-use crate::consts::{DeviceId, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
+use crate::consts::{
+    CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, DeviceId, PRIVATE_KEY_FILE_NAME,
+    SIGNING_KEY,
+};
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use base32::Alphabet;
 use der::pem::LineEnding;

@@ -3,10 +3,10 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Instant, sleep};
 
 lazy_static! {
@@ -51,10 +51,6 @@ impl DeviceManager {
     pub fn get_channel_sender(&self) -> Sender<DeviceManagerQuery> {
         self.bounded_channel.0.clone()
     }
-
-    fn get_channel_receiver(&mut self) -> &Mutex<Receiver<DeviceManagerQuery>> {
-        &self.bounded_channel.1
-    }
 }
 
 pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -71,7 +67,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
 
                         let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
 
-                         let mut devices = known_devices.write().unwrap();
+                         let mut devices = known_devices.write().await;
                 match devices.entry(device_id) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         entry.get_mut().update_last_seen();
@@ -101,7 +97,7 @@ pub async fn cleanup() {
     loop {
         sleep(Duration::from_secs(CLEANUP_DELAY)).await;
 
-        let mut devices = device_manager.known_devices.write().unwrap();
+        let mut devices = device_manager.known_devices.write().await;
         let now = Instant::now();
         devices.retain(|id, device| {
             if now.duration_since(device.last_seen).as_secs() > MAX_DEAD {
@@ -110,5 +106,13 @@ pub async fn cleanup() {
             }
             true
         })
+    }
+}
+
+pub async fn get_device(device_id: String) -> Option<DiscoveredDevice> {
+    let device_manager = Arc::new(&DefaultDeviceManager);
+    match device_manager.known_devices.read().await.get(&device_id) {
+        None => None,
+        Some(dv) => Some(dv.clone()),
     }
 }

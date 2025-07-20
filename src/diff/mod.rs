@@ -168,9 +168,7 @@ pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), DAE
     //file hash deviation considered to load instantly
 
     let mut buf = [0u8; 65536];
-    while reader.try_read(&mut buf)? > 0 {
-        
-    }
+    while reader.try_read(&mut buf)? > 0 {}
 
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut total_bytes_received = 0;
