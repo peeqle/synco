@@ -7,7 +7,7 @@ use crate::connection::cleanup;
 use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
-use crate::server::DefaultServer;
+use crate::server::{DefaultServer, start_server};
 use crate::state::InternalState;
 use tokio::time::sleep;
 
@@ -66,7 +66,7 @@ async fn main() -> Result<(), NetError> {
             local_ip
         )),
         tokio::spawn(broadcast::start_listener()),
-        tokio::spawn(async move { default_server.start().await }),
+        tokio::spawn(async move { start_server(default_server).await }),
         tokio::spawn(async move { device_manager_arc_for_join.start().await }),
         tokio::spawn(cleanup()),
         known_devices_printer_handle

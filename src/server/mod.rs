@@ -30,6 +30,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, mpsc};
+use tokio::task;
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
@@ -152,126 +153,134 @@ impl TcpServer {
 
         Ok(config)
     }
+}
 
-    pub async fn start(&self) -> Result<(), NetError> {
-        let listener =
-            TcpListener::bind(format!("{}:{}", &self.local_ip, DEFAULT_SERVER_PORT)).await?;
+pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
+    let listener =
+        TcpListener::bind(format!("{}:{}", server.local_ip, DEFAULT_SERVER_PORT)).await?;
 
-        let some = Arc::new(self.bounded_channel.0.clone());
-        loop {
-            let (socket, peer_addr) = listener.accept().await?;
-            let acceptor = self.current_acceptor.clone();
+    let acceptor = server.current_acceptor.clone();
+    let connected_devices = server.connected_devices.clone();
+    let default_device_manager = DefaultDeviceManager.clone();
 
-            socket.readable().await?;
-            let sender_clone = Arc::clone(&some);
-            let connected_devices_clone_arc = Arc::clone(&self.connected_devices);
-            let discovered_devices = Arc::clone(&DefaultDeviceManager);
+    loop {
+        let (socket, peer_addr) = listener.accept().await?;
 
-            let peer_arc = Arc::new(peer_addr);
+        let server_clone = server.clone();
+        let acceptor_clone = acceptor.clone();
+        let connected_devices_clone = connected_devices.clone();
+        let default_device_manager_clone = default_device_manager.clone();
 
-            tokio::spawn(async move {
-                match acceptor.accept(socket).await {
-                    Ok(mut tls_stream) => {
-                        let (reader, mut writer) = tls_stream.get_mut();
+        task::spawn(async move {
+            match acceptor_clone.accept(socket).await {
+                Ok(mut tls_stream) => {
+                    let (reader, mut writer) = tls_stream.get_mut();
 
-                        let cn_lock = connected_devices_clone_arc.lock().await;
-                        let connecting_device_option: Option<DiscoveredDevice> = {
-                            let discovered_devices_guard =
-                                discovered_devices.known_devices.read().expect(
-                                    "Cannot find suitable known devices holder in devices manager",
-                                );
-
-                            discovered_devices_guard
-                                .iter()
-                                .filter(|(id, device)| device.connect_addr.ip().eq(&peer_arc.ip()))
-                                .map(|(id, device)| device.clone())
-                                .last()
-                        };
-
-                        handle_client_actions(connecting_device_option, peer_arc, reader, writer, &cn_lock).await;
-                    }
-                    Err(e) => {
-                        eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
-                    }
-                }
-            });
-        }
-
-        async fn handle_client_actions(
-            connecting_device_option: Option<DiscoveredDevice>,
-            peer_arc: Arc<SocketAddr>,
-            reader: &mut TcpStream,
-            writer: &mut ServerConnection,
-            cn_lock: &HashMap<String, String>,
-        ) {
-            if !connecting_device_option.is_some() {
-                info!("Cannot identify device of IP {}", peer_arc.ip().to_string());
-                return;
-            } else if !cn_lock.contains_key(&peer_arc.ip().to_string()) {
-                let device = connecting_device_option.unwrap();
-                if let Ok(ser) = get_serialized_challenge(device.clone()).await {
-                    if let Err(e) = writer.writer().write_all(&ser) {
-                        eprintln!("Failed to write challenge: {}", e);
-                    }
-                } else {
-                    eprintln!("Failed to serialize challenge.");
-                }
-            } else {
-                let mut buffer = vec![0; 4096];
-                let mut result = vec![];
-
-                loop {
-                    let bytes_read = reader.try_read(&mut buffer).unwrap();
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    result.extend_from_slice(&buffer[..bytes_read]);
-                }
-
-                if !result.is_empty() {
-                    match serde_json::from_slice::<ConnectionRequestQuery>(result.as_slice()) {
-                        Ok(query) => match query {
-                            ConnectionRequestQuery::InitialRequest { .. } => {}
-                            ConnectionRequestQuery::ChallengeRequest { .. } => {}
-                            ConnectionRequestQuery::ChallengeResponse { .. } => {}
-                            ConnectionRequestQuery::AcceptConnection(_) => {}
-                            ConnectionRequestQuery::RejectConnection(_) => {}
-                        },
-                        Err(err) => {
-                            println!(
-                                "[SERVER] Error occurred while processing client's message: {}",
-                                err
-                            )
-                        }
+                    let connecting_device_option: Option<DiscoveredDevice> = {
+                        let discovered_devices_guard = default_device_manager_clone
+                            .known_devices
+                            .read()
+                            .expect("Cannot obtain read permission");
+                        discovered_devices_guard
+                            .iter()
+                            .filter(|(_id, device)| device.connect_addr.ip() == peer_addr.ip())
+                            .map(|(_id, device)| device.clone())
+                            .last()
                     };
+
+                    {
+                        let connected_devices_lock = connected_devices_clone.lock().await.clone();
+                        handle_client_actions(
+                            connecting_device_option,
+                            peer_addr,
+                            reader,
+                            writer,
+                            connected_devices_lock,
+                        )
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
                 }
             }
+        });
+    }
+}
+
+async fn handle_client_actions(
+    connecting_device_option: Option<DiscoveredDevice>,
+    peer_arc: SocketAddr,
+    reader: &mut TcpStream,
+    writer: &mut ServerConnection,
+    connected_devices: HashMap<String, String>,
+) {
+    if !connecting_device_option.is_some() {
+        info!("Cannot identify device of IP {}", peer_arc.ip().to_string());
+        return;
+    } else if !connected_devices.contains_key(&peer_arc.ip().to_string()) {
+        let device = connecting_device_option.unwrap();
+        if let Ok(ser) = get_serialized_challenge(device.clone()).await {
+            if let Err(e) = writer.writer().write_all(&ser) {
+                eprintln!("Failed to write challenge: {}", e);
+            }
+        } else {
+            eprintln!("Failed to serialize challenge.");
+        }
+    } else {
+        let mut buffer = vec![0; 4096];
+        let mut result = vec![];
+
+        loop {
+            let bytes_read = reader.try_read(&mut buffer).unwrap();
+            if bytes_read == 0 {
+                break;
+            }
+            result.extend_from_slice(&buffer[..bytes_read]);
         }
 
-        async fn get_serialized_challenge(
-            device: DiscoveredDevice,
-        ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
-            let challenge_query = generate_challenge(&device).await?;
-            let serialized = serde_json::to_vec(&challenge_query)?;
-            Ok(serialized)
+        if !result.is_empty() {
+            match serde_json::from_slice::<ConnectionRequestQuery>(result.as_slice()) {
+                Ok(query) => match query {
+                    ConnectionRequestQuery::InitialRequest { .. } => {}
+                    ConnectionRequestQuery::ChallengeRequest { .. } => {}
+                    ConnectionRequestQuery::ChallengeResponse { .. } => {}
+                    ConnectionRequestQuery::AcceptConnection(_) => {}
+                    ConnectionRequestQuery::RejectConnection(_) => {}
+                },
+                Err(err) => {
+                    println!(
+                        "[SERVER] Error occurred while processing client's message: {}",
+                        err
+                    )
+                }
+            };
         }
     }
+}
 
-    pub async fn generate_device_handshake_challenge(&self, device_id: String) {
-        let nonce = Uuid::new_v4();
-        let device_pk = DEVICE_SIGNING_KEY.clone();
+async fn get_serialized_challenge(
+    device: DiscoveredDevice,
+) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    let challenge_query = generate_challenge(&device).await?;
+    let serialized = serde_json::to_vec(&challenge_query)?;
+    Ok(serialized)
+}
 
-        let encoded_nonce = device_pk.sign(nonce.as_bytes().as_slice());
-        &self
-            .get_channel_sender()
-            .send(ChallengeRequest {
-                device_id,
-                nonce: encoded_nonce.to_vec(),
-            })
-            .await;
-    }
+pub async fn generate_device_handshake_challenge(server: Arc<TcpServer>, device_id: String) {
+    let nonce = Uuid::new_v4();
+    let device_pk = DEVICE_SIGNING_KEY.clone();
 
-    pub fn get_channel_sender(&self) -> Sender<ConnectionRequestQuery> {
-        self.bounded_channel.0.clone()
-    }
+    let encoded_nonce = device_pk.sign(nonce.as_bytes().as_slice());
+    get_channel_sender(server)
+        .send(ChallengeRequest {
+            device_id,
+            nonce: encoded_nonce.to_vec(),
+        })
+        .await
+        .expect("Cannot create new challenge request");
+}
+
+pub fn get_channel_sender(server: Arc<TcpServer>) -> Sender<ConnectionRequestQuery> {
+    server.bounded_channel.0.clone()
 }
