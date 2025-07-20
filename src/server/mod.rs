@@ -1,21 +1,21 @@
+use crate::NetError;
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::generate_challenge;
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::{
-    generate_server_ca_keys, load_cert_der, load_private_key_der, DEVICE_SIGNING_KEY,
+    DEVICE_SIGNING_KEY, generate_server_ca_keys, load_cert_der, load_private_key_der,
 };
 use crate::machine_utils::get_local_ip;
 use crate::server::ConnectionRequestQuery::ChallengeRequest;
 use crate::server::ConnectionState::{Access, Denied};
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
-use crate::NetError;
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use log::info;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig, ServerConnection};
+use rustls::{ServerConfig, ServerConnection, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task;
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
@@ -207,7 +207,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                         peer_addr,
                         connection,
                     )
-                        .await;
+                    .await;
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);

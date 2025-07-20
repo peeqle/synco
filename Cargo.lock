@@ -1615,6 +1615,7 @@ dependencies = [
  "aes-gcm",
  "base32",
  "blake3",
+ "crossterm",
  "der 0.7.10",
  "dirs",
  "ed25519-dalek",
