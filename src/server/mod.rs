@@ -1,5 +1,5 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::generate_challenge;
+use crate::challenge::{generate_challenge, DefaultChallengeManager, DeviceChallengeStatus};
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain::{
@@ -8,7 +8,7 @@ use crate::keychain::{
 use crate::machine_utils::get_local_ip;
 use crate::server::ConnectionRequestQuery::RejectConnection;
 use crate::server::ConnectionState::{Access, Denied, Pending, Unknown};
-use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
+use crate::utils::{decrypt_with_passphrase, get_server_cert_storage, load_cas, validate_server_cert_present};
 use crate::NetError;
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
@@ -105,6 +105,7 @@ pub enum ConnectionRequestQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerActivity {
     SendChallenge { device_id: String },
+    VerifiedChallenge { device_id: String },
 }
 
 #[derive(Clone, PartialEq, Default)]
@@ -275,6 +276,9 @@ async fn handle_receiver_message(server: Arc<TcpServer>, message: ServerActivity
                 }
             }
         }
+        ServerActivity::VerifiedChallenge {device_id} => {
+            
+        }
     }
     Ok(())
 }
@@ -341,7 +345,36 @@ async fn send_challenge(device: DiscoveredDevice, connection: &mut ServerConnect
     }
 }
 
-async fn verify_challenge(device_id: String, verification_body: String) {}
+async fn verify_challenge(device_id: String, verification_body: Vec<u8>) {
+    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+    let challenge = {
+        let challenges = challenge_manager.current_challenges.read().await;
+        challenges.get(&device_id).cloned()
+    };
+
+    match challenge {
+        None => {}
+        Some(cha) => {
+            match cha {
+                DeviceChallengeStatus::Active {
+                    socket_addr, nonce, nonce_hash,
+                    salt, passphrase, attempts, ttl
+                } => {
+                    match decrypt_with_passphrase(
+                        verification_body.as_slice(),
+                        &nonce.try_into().unwrap(),
+                        &salt.try_into().unwrap(),
+                        passphrase.as_slice(),
+                    ) {
+                        Ok(result) => {}
+                        Err(_) => {}
+                    };
+                }
+                DeviceChallengeStatus::Closed { .. } => {}
+            }
+        }
+    }
+}
 
 async fn get_serialized_challenge(
     device: DiscoveredDevice,

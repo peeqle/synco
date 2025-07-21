@@ -160,57 +160,6 @@ pub fn decrypt_with_passphrase(
     Ok(plaintext)
 }
 
-pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[u8]) -> bool {
-    let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
-
-    let mut lck = default_challenge_manager_arc
-        .current_challenges
-        .read()
-        .await;
-    let current_device_challenge = lck.get(&_device.device_id);
-
-    if let Some(device) = current_device_challenge {
-        match device {
-            Active {
-                socket_addr,
-                nonce,
-                nonce_hash,
-                passphrase,
-                attempts,
-                ttl,
-            } => {
-                if *attempts <= 0 {
-                    debug!("User cannot connect due to retries fall");
-                } else {
-                    let mut passphrase_array: [u8; 32] = [0; 32];
-                    passphrase_array.copy_from_slice(&passphrase);
-
-                    let mut nonce_array: [u8; 12] = [0; 12];
-                    nonce_array.copy_from_slice(&nonce_hash);
-
-                    // match decrypt_with_passphrase(
-                    //     &passphrase_array,
-                    //     &nonce_array,
-                    //     encoded_passphrase,
-                    // ) {
-                    //     Ok(_) => {}
-                    //     Err(err) => {
-                    //         info!(
-                    //             "User {} tried to connect but failed with passphrase {}",
-                    //             _device.connect_addr.ip().to_string(),
-                    //             String::from_utf8_lossy(&passphrase_array)
-                    //         )
-                    //     }
-                    // };
-                }
-            }
-            DeviceChallengeStatus::Closed { .. } => {}
-        }
-    };
-
-    false
-}
-
 mod test {
     use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
     use uuid::Uuid;

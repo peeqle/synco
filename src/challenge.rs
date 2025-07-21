@@ -4,6 +4,7 @@ use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
 use crate::server::ConnectionRequestQuery;
 use crate::utils::control::ConnectionStatusVerification;
+use crate::utils::encrypt_with_passphrase;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::aes::Aes128;
@@ -50,11 +51,13 @@ pub enum ChallengeEvent {
 }
 
 #[derive(PartialEq)]
+#[derive(Clone)]
 pub enum DeviceChallengeStatus {
     Active {
         socket_addr: SocketAddr,
         nonce: Vec<u8>,
         nonce_hash: Vec<u8>,
+        salt: Vec<u8>,
         passphrase: Vec<u8>,
         attempts: i16,
         ttl: Instant,
@@ -73,6 +76,7 @@ impl ConnectionStatusVerification for DeviceChallengeStatus {
                 socket_addr,
                 nonce,
                 nonce_hash,
+                salt,
                 passphrase,
                 attempts,
                 ttl,
@@ -156,11 +160,9 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) {
         let mut receiver = receiver_mutex.lock().await;
         tokio::select! {
         Some(message) = receiver.recv() => {
-            match message {
-             ChallengeEvent::NewDevice{ device_id } => {
+            match message {ChallengeEvent::NewDevice{ device_id } => {
 
-                    }
-                    ChallengeEvent::ChallengeVerification{ .. } => {}
+                    }ChallengeEvent::ChallengeVerification{ .. } => {}
                 }
             }
         }
@@ -176,50 +178,49 @@ pub async fn generate_challenge(
 ) -> Result<ConnectionRequestQuery, Box<dyn Error + Send + Sync>> {
     debug!("Generating a challenge for: {}", device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
-    let signed = keychain::sign(nonce_uuid_hash.to_string())
-        .expect("[CONNECTION] Somehow signing issues occurred ;(");
+    let result = encrypt_with_passphrase(nonce_uuid_hash.as_bytes(), b"key").unwrap();
 
-    {
-        let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
+    let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
 
-        let mut current_challenges = default_challenge_manager_arc
-            .current_challenges
-            .write()
-            .await;
+    let mut current_challenges = default_challenge_manager_arc
+        .current_challenges
+        .write()
+        .await;
 
-        match get_device(device_id.clone()).await {
-            None => {
-                return Err(Box::new(io::Error::new(
-                    ErrorKind::NotFound,
-                    "No device discovered for challenge",
-                )));
-            }
-            Some(device) => match current_challenges.get(&device.device_id) {
-                None => {
-                    current_challenges.insert(
-                        device_id.clone(),
-                        Active {
-                            socket_addr: device.connect_addr,
-                            nonce: signed.to_vec(),
-                            nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
-                            passphrase: blake3::hash(b"key").as_bytes().to_vec(),
-                            attempts: 3,
-                            ttl: Instant::now().add(Duration::from_secs(60 * 5)),
-                        },
-                    );
-                }
-                Some(device_connection_status) => match device_connection_status.verify_self() {
-                    Ok(res) => {
-                        debug!("Device is trying to reconnect again");
-                    }
-                    Err(_) => {}
-                },
-            },
+    match get_device(device_id.clone()).await {
+        None => {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::NotFound,
+                "No device discovered for challenge",
+            )));
         }
+        Some(device) => match current_challenges.get(&device.device_id) {
+            None => {
+                current_challenges.insert(
+                    device_id.clone(),
+                    Active {
+                        socket_addr: device.connect_addr,
+                        nonce: result.1.into(),
+                        salt: result.2.into(),
+                        nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
+                        passphrase: blake3::hash(b"key").as_bytes().to_vec(),
+                        attempts: 3,
+                        ttl: Instant::now().add(Duration::from_secs(60 * 5)),
+                    },
+                );
+            }
+            Some(device_connection_status) => match device_connection_status.verify_self() {
+                Ok(res) => {
+                    debug!("Device is trying to reconnect again");
+                }
+                Err(_) => {}
+            },
+        },
     }
+
 
     Ok(ConnectionRequestQuery::ChallengeRequest {
         device_id: device_id.clone(),
-        nonce: signed.to_vec(),
+        nonce: result.0,
     })
 }
