@@ -304,9 +304,7 @@ async fn handle_client_actions(
             Ok(query) => match query {
                 ConnectionRequestQuery::InitialRequest { .. } => {}
                 ConnectionRequestQuery::ChallengeRequest { .. } => {}
-                ConnectionRequestQuery::ChallengeResponse { device_id, response } => {
-                    verify_challenge
-                }
+                ConnectionRequestQuery::ChallengeResponse { .. } => {}
                 ConnectionRequestQuery::AcceptConnection(_) => {}
                 ConnectionRequestQuery::RejectConnection(_) => {}
             },
@@ -342,6 +340,8 @@ async fn send_challenge(device: DiscoveredDevice, connection: &mut ServerConnect
         )))
     }
 }
+
+async fn verify_challenge(device_id: String, verification_body: String) {}
 
 async fn get_serialized_challenge(
     device: DiscoveredDevice,

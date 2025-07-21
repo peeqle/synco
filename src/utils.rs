@@ -6,7 +6,9 @@ use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use log::{debug, info};
+use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
+use sha2::Sha256;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -121,27 +123,41 @@ pub fn validate_server_cert_present() -> bool {
 
 pub fn encrypt_with_passphrase(
     nonce_hash: &[u8],
-    passphrase: &[u8; 32],
-) -> Result<(Vec<u8>, [u8; 12]), aes_gcm::Error> {
-    let cipher = Aes128Gcm::new_from_slice(passphrase).map_err(|_| aes_gcm::Error)?;
+    passphrase: &[u8],
+) -> Result<(Vec<u8>, [u8; 12], [u8; 16]), aes_gcm::Error> {
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+
+    let mut key_bytes = [0u8; 16];
+    pbkdf2_hmac::<Sha256>(passphrase, &salt, 100_000, &mut key_bytes);
+
+    let cipher = Aes128Gcm::new_from_slice(&key_bytes)
+        .map_err(|_| aes_gcm::Error)?;
 
     let mut iv_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut iv_bytes);
     let nonce = Nonce::from_slice(&iv_bytes);
 
     let ciphertext_with_tag = cipher.encrypt(nonce, nonce_hash)?;
-    Ok((ciphertext_with_tag, iv_bytes))
+    Ok((ciphertext_with_tag, iv_bytes, salt))
 }
 
 pub fn decrypt_with_passphrase(
-    passphrase: &[u8; 32],
-    iv_bytes: &[u8; 12],
     ciphertext_with_tag: &[u8],
+    nonce_bytes: &[u8; 12],
+    salt_bytes: &[u8; 16],
+    passphrase: &[u8],
 ) -> Result<Vec<u8>, aes_gcm::Error> {
-    let cipher = Aes128Gcm::new_from_slice(passphrase).map_err(|_| aes_gcm::Error)?;
-    let nonce = Nonce::from_slice(iv_bytes);
+    let mut key_bytes = [0u8; 16];
+    pbkdf2_hmac::<Sha256>(passphrase, salt_bytes, 100_000, &mut key_bytes);
 
-    cipher.decrypt(nonce, ciphertext_with_tag)
+    let cipher = Aes128Gcm::new_from_slice(&key_bytes)
+        .map_err(|_| aes_gcm::Error)?;
+
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher.decrypt(nonce, ciphertext_with_tag.as_ref())?;
+
+    Ok(plaintext)
 }
 
 pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[u8]) -> bool {
@@ -172,20 +188,20 @@ pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[
                     let mut nonce_array: [u8; 12] = [0; 12];
                     nonce_array.copy_from_slice(&nonce_hash);
 
-                    match decrypt_with_passphrase(
-                        &passphrase_array,
-                        &nonce_array,
-                        encoded_passphrase,
-                    ) {
-                        Ok(_) => {}
-                        Err(err) => {
-                            info!(
-                                "User {} tried to connect but failed with passphrase {}",
-                                _device.connect_addr.ip().to_string(),
-                                String::from_utf8_lossy(&passphrase_array)
-                            )
-                        }
-                    };
+                    // match decrypt_with_passphrase(
+                    //     &passphrase_array,
+                    //     &nonce_array,
+                    //     encoded_passphrase,
+                    // ) {
+                    //     Ok(_) => {}
+                    //     Err(err) => {
+                    //         info!(
+                    //             "User {} tried to connect but failed with passphrase {}",
+                    //             _device.connect_addr.ip().to_string(),
+                    //             String::from_utf8_lossy(&passphrase_array)
+                    //         )
+                    //     }
+                    // };
                 }
             }
             DeviceChallengeStatus::Closed { .. } => {}
@@ -193,4 +209,30 @@ pub async fn verify_passphrase(_device: DiscoveredDevice, encoded_passphrase: &[
     };
 
     false
+}
+
+mod test {
+    use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
+    use uuid::Uuid;
+
+    #[test]
+    pub fn test_verification() {
+        let uuid = Uuid::new_v4();
+        let nonce_hash = blake3::hash(uuid.as_bytes());
+        let passphrase = "Hello, World!";
+
+        let data_to_encrypt = nonce_hash.as_bytes();
+
+        let enc_response = encrypt_with_passphrase(data_to_encrypt, &passphrase.as_bytes()).expect("Cannot encrypt");
+
+        let decr_response = decrypt_with_passphrase(
+            &enc_response.0,
+            &enc_response.1,
+            &enc_response.2,
+            passphrase.as_bytes(),
+        ).expect("Cannot decrypt");
+
+        println!("Decrypted data: {:?}", decr_response);
+        assert_eq!(decr_response.as_slice(), data_to_encrypt);
+    }
 }
