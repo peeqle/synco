@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::challenge::cleanup;
-use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
+use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
-use crate::server::{DefaultServer, start_server};
+use crate::server::{start_server, DefaultServer};
 use crate::state::InternalState;
 use crate::ui::start_ui;
 use tokio::time::sleep;
@@ -30,7 +30,6 @@ type NetError = Box<dyn Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> Result<(), NetError> {
-    // Check for UI flag
     let args: Vec<String> = std::env::args().collect();
     let use_ui = args.contains(&"--ui".to_string()) || args.contains(&"-u".to_string());
 
@@ -45,12 +44,11 @@ async fn main() -> Result<(), NetError> {
     if use_ui {
         println!("Starting with UI mode...");
         println!("Use Ctrl+C to stop background services");
-        
+
         let device_manager_arc = Arc::clone(&DefaultDeviceManager);
         let default_server = Arc::clone(&DefaultServer);
         let device_manager_arc_for_join = device_manager_arc.clone();
 
-        // Start background services
         let _background_services = tokio::try_join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
@@ -61,15 +59,13 @@ async fn main() -> Result<(), NetError> {
             tokio::spawn(async move { device_manager_arc_for_join.start().await }),
             tokio::spawn(cleanup()),
             tokio::spawn(async move {
-                // Give services time to start
-                sleep(Duration::from_secs(2)).await;
                 start_ui().await
             })
         );
     } else {
         println!("Starting in headless mode...");
         println!("Use --ui or -u flag to start with terminal interface");
-        
+
         let device_manager_arc = Arc::clone(&DefaultDeviceManager);
         let default_server = Arc::clone(&DefaultServer);
         let dv_cp = device_manager_arc.clone();
@@ -94,8 +90,8 @@ async fn main() -> Result<(), NetError> {
                 println!("---------------------------------\n");
             }
         });
-        
-        tokio::try_join!(
+
+        let tasks = tokio::try_join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
                 local_ip

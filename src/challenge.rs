@@ -1,10 +1,9 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
-use crate::device_manager::{DefaultDeviceManager, get_device};
+use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
 use crate::server::ConnectionRequestQuery;
 use crate::utils::control::ConnectionStatusVerification;
-use DeviceChallengeStatus::Active;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::aes::Aes128;
@@ -22,9 +21,10 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock, mpsc};
-use tokio::time::{Instant, sleep};
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
+use DeviceChallengeStatus::Active;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
