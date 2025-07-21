@@ -25,6 +25,7 @@ mod server;
 mod state;
 mod ui;
 mod utils;
+mod chain;
 
 type NetError = Box<dyn Error + Send + Sync>;
 

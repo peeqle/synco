@@ -1,9 +1,9 @@
-use crate::NetError;
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::DeviceId;
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
+use crate::NetError;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
@@ -11,7 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveryMessage {
@@ -114,39 +114,40 @@ pub async fn start_listener() -> Result<(), NetError> {
                     current_device_id
                 );
 
-                // if msg.device_id != current_device_id {
-                let known_devices = {
-                    let read_guard = device_manager_arc.known_devices.read().await;
-                    read_guard.clone()
-                };
+                if msg.device_id != current_device_id {
+                    let known_devices = {
+                        let read_guard = device_manager_arc.known_devices.read().await;
+                        read_guard.clone()
+                    };
 
-                if !known_devices.contains_key(&current_device_id) {
-                    if known_devices
-                        .get(&current_device_id)
-                        .take_if(|x| x.state == DeviceConnectionState::OPEN)
-                        .is_some()
-                    {
-                        info!(
-                            "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
-                            msg.device_id, msg.listening_port, remote_addr
-                        );
+                    if !known_devices.contains_key(&current_device_id) {
+                        if known_devices
+                            .get(&current_device_id)
+                            .take_if(|x| x.state == DeviceConnectionState::OPEN)
+                            .is_some()
+                        {
+                            info!(
+                                "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
+                                msg.device_id, msg.listening_port, remote_addr
+                            );
 
-                        //generate challenge
-                        if msg.wants_to_connect {
-                            challenge_manager
-                                .get_sender()
-                                .send(ChallengeEvent::NewDevice {
-                                    device_id: msg.device_id.clone(),
-                                })
-                                .await?;
+                            //generate challenge
+                            if msg.wants_to_connect {
+                                challenge_manager
+                                    .get_sender()
+                                    .send(ChallengeEvent::NewDevice {
+                                        device_id: msg.device_id.clone(),
+                                    })
+                                    .await?;
+                            }
                         }
+                        device_manager_sender
+                            .send(DeviceManagerQuery::DiscoveredDevice {
+                                device_id: msg.device_id.clone(),
+                                socket_addr: remote_addr,
+                            })
+                            .await?;
                     }
-                    device_manager_sender
-                        .send(DeviceManagerQuery::DiscoveredDevice {
-                            device_id: msg.device_id.clone(),
-                            socket_addr: remote_addr,
-                        })
-                        .await?;
                 }
             }
             Err(e) => {
