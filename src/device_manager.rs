@@ -5,6 +5,7 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use log::info;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Instant, sleep};
@@ -92,7 +93,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 pub async fn cleanup() {
-    println!("Device cleaner has started");
+    info!("Device cleaner has started");
     let device_manager = Arc::clone(&DefaultDeviceManager);
     loop {
         sleep(Duration::from_secs(CLEANUP_DELAY)).await;
@@ -101,7 +102,7 @@ pub async fn cleanup() {
         let now = Instant::now();
         devices.retain(|id, device| {
             if now.duration_since(device.last_seen).as_secs() > MAX_DEAD {
-                println!("Removing device {} ", id);
+                info!("Removing device {} ", id);
                 return false;
             }
             true

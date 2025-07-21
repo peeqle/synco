@@ -1,5 +1,6 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::{generate_challenge, DefaultChallengeManager, DeviceChallengeStatus};
+use crate::challenge::DeviceChallengeStatus::Active;
+use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager, DeviceChallengeStatus};
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain::{
@@ -29,6 +30,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
@@ -75,7 +77,7 @@ pub struct TcpServer {
     current_acceptor: Arc<TlsAcceptor>,
     //socket_addr to device_id
     connected_devices: Arc<Mutex<HashMap<String, TcpPeer>>>,
-    pub(crate) bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
+    pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
 }
 
 pub struct TcpPeer {
@@ -171,20 +173,44 @@ impl TcpServer {
     }
 }
 
+pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    info!("Starting server...");
+    let res = tokio::try_join!(
+             tokio::spawn(start_server(Arc::clone(&server))),
+        tokio::spawn(listen_actions(Arc::clone(&server))),
+        );
+
+    match res {
+        Ok((start_server_result, listen_actions_result)) => {
+            start_server_result?;
+            listen_actions_result?;
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error in run: {:?}", e);
+            Err(e.into())
+        }
+    }
+}
+
 pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
+    if !is_tcp_port_available(DEFAULT_SERVER_PORT).await {
+        panic!("Cannot start server on {}", DEFAULT_SERVER_PORT);
+    }
+
     let listener =
         TcpListener::bind(format!("{}:{}", server.local_ip, DEFAULT_SERVER_PORT)).await?;
 
     let acceptor = server.current_acceptor.clone();
     let default_device_manager = DefaultDeviceManager.clone();
 
+    info!("Server started.");
     loop {
         let (socket, peer_addr) = listener.accept().await?;
 
         let server_arc = server.clone();
         let acceptor_clone = acceptor.clone();
         let default_device_manager_clone = default_device_manager.clone();
-
         task::spawn(async move {
             match acceptor_clone.accept(socket).await {
                 Ok(mut tls_stream) => {
@@ -276,8 +302,12 @@ async fn handle_receiver_message(server: Arc<TcpServer>, message: ServerActivity
                 }
             }
         }
-        ServerActivity::VerifiedChallenge {device_id} => {
-            
+        ServerActivity::VerifiedChallenge { device_id } => {
+            let mut cp = server.connected_devices.lock().await;
+            let mut _device = cp.get_mut(&device_id);
+            if let Some(device) = _device {
+                device.connection_status = Access;
+            }
         }
     }
     Ok(())
@@ -291,6 +321,7 @@ async fn handle_client_actions(
 ) {
     let arc = server.connected_devices.clone();
     let guard = arc.lock().await;
+    let default_challenge_manager = Arc::clone(&DefaultChallengeManager);
 
     let mut buffer = vec![0; 4096];
     let mut result = vec![];
@@ -308,7 +339,15 @@ async fn handle_client_actions(
             Ok(query) => match query {
                 ConnectionRequestQuery::InitialRequest { .. } => {}
                 ConnectionRequestQuery::ChallengeRequest { .. } => {}
-                ConnectionRequestQuery::ChallengeResponse { .. } => {}
+                ConnectionRequestQuery::ChallengeResponse { .. } => {
+                    match default_challenge_manager.get_sender()
+                        .send(ChallengeEvent::ChallengeVerification {
+                            connection_response: query
+                        }).await {
+                        Ok(_) => {}
+                        Err(_) => {}
+                    };
+                }
                 ConnectionRequestQuery::AcceptConnection(_) => {}
                 ConnectionRequestQuery::RejectConnection(_) => {}
             },
@@ -345,41 +384,25 @@ async fn send_challenge(device: DiscoveredDevice, connection: &mut ServerConnect
     }
 }
 
-async fn verify_challenge(device_id: String, verification_body: Vec<u8>) {
-    let challenge_manager = Arc::clone(&DefaultChallengeManager);
-    let challenge = {
-        let challenges = challenge_manager.current_challenges.read().await;
-        challenges.get(&device_id).cloned()
-    };
-
-    match challenge {
-        None => {}
-        Some(cha) => {
-            match cha {
-                DeviceChallengeStatus::Active {
-                    socket_addr, nonce, nonce_hash,
-                    salt, passphrase, attempts, ttl
-                } => {
-                    match decrypt_with_passphrase(
-                        verification_body.as_slice(),
-                        &nonce.try_into().unwrap(),
-                        &salt.try_into().unwrap(),
-                        passphrase.as_slice(),
-                    ) {
-                        Ok(result) => {}
-                        Err(_) => {}
-                    };
-                }
-                DeviceChallengeStatus::Closed { .. } => {}
-            }
-        }
-    }
-}
-
 async fn get_serialized_challenge(
     device: DiscoveredDevice,
 ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     let challenge_query = generate_challenge(device.device_id.clone()).await?;
     let serialized = serde_json::to_vec(&challenge_query)?;
     Ok(serialized)
+}
+
+
+async fn is_tcp_port_available(port: u16) -> bool {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    match TcpListener::bind(addr).await {
+        Ok(listener) => {
+            drop(listener);
+            true
+        }
+        Err(_) => {
+            false
+        }
+    }
 }

@@ -9,6 +9,7 @@ use std::cmp::PartialEq;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use log::{error, info};
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, sleep};
 
@@ -86,7 +87,7 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 pub async fn start_listener() -> Result<(), NetError> {
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
-    println!("Broadcast listener started on {}", listen_addr);
+    info!("Broadcast listener started on {}", listen_addr);
 
     let mut buf = vec![0u8; 1024];
 
@@ -106,7 +107,7 @@ pub async fn start_listener() -> Result<(), NetError> {
                     .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
                         SocketAddr::new(ip, msg.listening_port)
                     });
-                println!(
+                info!(
                     "device {:?} device id : {:?} sender id: {:?}",
                     msg,
                     device_id(),
@@ -125,7 +126,7 @@ pub async fn start_listener() -> Result<(), NetError> {
                         .take_if(|x| x.state == DeviceConnectionState::OPEN)
                         .is_some())
                 {
-                    println!(
+                    info!(
                         "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
                         msg.device_id, msg.listening_port, remote_addr
                     );
@@ -149,7 +150,7 @@ pub async fn start_listener() -> Result<(), NetError> {
                 // }
             }
             Err(e) => {
-                eprintln!(
+                error!(
                     "Failed to parse discovery message: {} from {}, message {}",
                     e, peer_addr, message_str
                 );
@@ -176,7 +177,7 @@ pub async fn start_broadcast_announcer(
     );
     let serialized_message = serde_json::to_string(&message)?;
 
-    println!("Broadcast announcer started. Sending on {}", broadcast_addr);
+    info!("Broadcast announcer started. Sending on {}", broadcast_addr);
 
     loop {
         socket

@@ -2,12 +2,12 @@ use std::error::Error;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-
-use crate::challenge::cleanup;
+use log::info;
+use crate::challenge::{cleanup, DefaultChallengeManager};
 use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
-use crate::server::{start_server, DefaultServer};
+use crate::server::{run, start_server, DefaultServer};
 use crate::state::InternalState;
 use crate::ui::start_ui;
 use tokio::time::sleep;
@@ -30,6 +30,8 @@ type NetError = Box<dyn Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> Result<(), NetError> {
+    env_logger::init();
+
     let args: Vec<String> = std::env::args().collect();
     let use_ui = args.contains(&"--ui".to_string()) || args.contains(&"-u".to_string());
 
@@ -37,13 +39,13 @@ async fn main() -> Result<(), NetError> {
 
     let local_ip = get_local_ip().expect("Could not determine local IP address");
 
-    println!("My Device ID: {}", &DeviceId[..]);
-    println!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
-    println!("My Local IP: {}", local_ip);
+    info!("My Device ID: {}", &DeviceId[..]);
+    info!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
+    info!("My Local IP: {}", local_ip);
 
     if use_ui {
-        println!("Starting with UI mode...");
-        println!("Use Ctrl+C to stop background services");
+        info!("Starting with UI mode...");
+        info!("Use Ctrl+C to stop background services");
 
         let device_manager_arc = Arc::clone(&DefaultDeviceManager);
         let default_server = Arc::clone(&DefaultServer);
@@ -63,8 +65,8 @@ async fn main() -> Result<(), NetError> {
             })
         );
     } else {
-        println!("Starting in headless mode...");
-        println!("Use --ui or -u flag to start with terminal interface");
+        info!("Starting in headless mode...");
+        info!("Use --ui or -u flag to start with terminal interface");
 
         let device_manager_arc = Arc::clone(&DefaultDeviceManager);
         let default_server = Arc::clone(&DefaultServer);
@@ -91,13 +93,15 @@ async fn main() -> Result<(), NetError> {
             }
         });
 
+        let challenge_manager = DefaultChallengeManager.clone();
         let tasks = tokio::try_join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
                 local_ip
             )),
             tokio::spawn(broadcast::start_listener()),
-            tokio::spawn(async move { start_server(default_server).await }),
+            tokio::spawn(async move { server::run(default_server.clone()).await }),
+            tokio::spawn(async move { challenge::run(challenge_manager.clone()).await }),
             tokio::spawn(async move { device_manager_arc_for_join.start().await }),
             tokio::spawn(cleanup()),
             known_devices_printer_handle

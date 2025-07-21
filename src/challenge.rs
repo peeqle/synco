@@ -2,9 +2,9 @@ use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
-use crate::server::ConnectionRequestQuery;
+use crate::server::{ConnectionRequestQuery, DefaultServer, ServerActivity, TcpServer};
 use crate::utils::control::ConnectionStatusVerification;
-use crate::utils::encrypt_with_passphrase;
+use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::aes::Aes128;
@@ -13,6 +13,7 @@ use lazy_static::lazy_static;
 use log::{debug, info};
 use rustls::compress::default_cert_compressors;
 use std::any::Any;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io;
@@ -109,6 +110,13 @@ impl ChallengeManager {
     }
 }
 
+pub async fn run(manager: Arc<ChallengeManager>) {
+    let res = tokio::try_join!(
+        tokio::spawn(challenge_listener(Arc::clone(&manager))),
+        tokio::spawn(cleanup()),
+    );
+}
+
 pub async fn cleanup() {
     let challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
     loop {
@@ -150,23 +158,79 @@ pub async fn cleanup() {
 }
 
 /**
-* listen to the device manager and initiate device verification fro device
+* listen to the device manager and initiate device verification for device
 */
-pub async fn challenge_listener(manager: Arc<ChallengeManager>) {
+pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let challenge_manager = manager.clone();
 
     let receiver_mutex = &challenge_manager.bounded_channel.1;
     loop {
         let mut receiver = receiver_mutex.lock().await;
         tokio::select! {
-        Some(message) = receiver.recv() => {
-            match message {ChallengeEvent::NewDevice{ device_id } => {
-
-                    }ChallengeEvent::ChallengeVerification{ .. } => {}
+           Some(message) = receiver.recv() => {
+                match message {
+                    ChallengeEvent::NewDevice { device_id } => {}
+                    ChallengeEvent::ChallengeVerification { connection_response } => {
+                        if let ConnectionRequestQuery::ChallengeResponse { device_id, response } = connection_response {
+                            verify_challenge(device_id, response).await?;
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+async fn verify_challenge(device_id: String, verification_body: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+    let challenge = {
+        let challenges = challenge_manager.current_challenges.read().await;
+        challenges.get(&device_id).cloned()
+    };
+
+    match challenge {
+        Some(Active {
+                 socket_addr, nonce, nonce_hash,
+                 salt, passphrase, mut attempts, ttl
+             }) => {
+            match decrypt_with_passphrase(
+                verification_body.as_slice(),
+                &nonce.try_into().unwrap(),
+                &salt.try_into().unwrap(),
+                passphrase.as_slice(),
+            ) {
+                Ok(_) => {
+                    Arc::clone(&DefaultServer).bounded_channel.0.send(ServerActivity::VerifiedChallenge {
+                        device_id: device_id.clone()
+                    }).await?;
+
+                    challenge_manager.current_challenges.write().await.remove(&device_id);
+                }
+                Err(e) => {
+                    eprintln!("Decryption error {}: {:?}", device_id, e);
+
+                    if attempts > 0 {
+                        attempts -= 1;
+                        let mut challenges_guard = challenge_manager.current_challenges.write().await;
+                        if let Some(entry) = challenges_guard.get_mut(&device_id) {
+                            if let Active { attempts: current_attempts, .. } = entry {
+                                *current_attempts = attempts;
+                            }
+                        }
+                        if attempts == 0 {
+                            challenges_guard.remove(&device_id);
+                        }
+                    } else {
+                        challenge_manager.current_challenges.write().await.remove(&device_id);
+                    }
+                    return Err(Box::new(io::Error::new(ErrorKind::BrokenPipe, format!("Decryption error: {}", device_id))));
+                }
+            };
+        }
+        Some(DeviceChallengeStatus::Closed { .. }) => {}
+        None => {}
+    }
+    Ok(())
 }
 
 /**
