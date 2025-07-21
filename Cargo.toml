@@ -28,3 +28,5 @@ ratatui = { version = "0.29.0", features = ["all-widgets"] }
 crossterm = "0.28.1"
 pbkdf2 = "0.12.2"
 sha2 = "0.10.9"
+mockall = "0.13.1"
+async-trait = "0.1.88"

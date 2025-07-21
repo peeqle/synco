@@ -1,24 +1,25 @@
-use crate::NetError;
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::DeviceChallengeStatus::Active;
 use crate::challenge::{
-    ChallengeEvent, DefaultChallengeManager, DeviceChallengeStatus, generate_challenge,
+    generate_challenge, ChallengeEvent, DefaultChallengeManager, DeviceChallengeStatus,
 };
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
-use crate::device_manager::{DefaultDeviceManager, get_device};
+use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
-use crate::server::ConnectionRequestQuery::RejectConnection;
-use crate::server::ConnectionState::{Access, Denied, Pending, Unknown};
+use crate::server::model::ConnectionRequestQuery::RejectConnection;
+use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
+use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, TcpPeer, TcpServer};
 use crate::utils::{
     decrypt_with_passphrase, get_server_cert_storage, load_cas, validate_server_cert_present,
 };
+use crate::NetError;
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{ServerConfig, ServerConnection, crypto};
+use rustls::{crypto, ServerConfig, ServerConnection};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,11 +35,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio_rustls::TlsAcceptor;
 
 mod tls_utils;
+pub(crate) mod model;
 
 lazy_static! {
     pub static ref DefaultServer: Arc<TcpServer> = {
@@ -47,132 +49,6 @@ lazy_static! {
             .expect("Cannot create new TcpServer instance");
         Arc::new(tcp_server)
     };
-}
-
-struct StaticCertResolver {
-    certs: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer<'static>,
-}
-impl Debug for StaticCertResolver {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
-
-impl ResolvesServerCert for StaticCertResolver {
-    fn resolve(
-        &self,
-        _client_hello: rustls::server::ClientHello,
-    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        let certified_key = rustls::sign::CertifiedKey {
-            cert: self.certs.clone(),
-            key: crypto::aws_lc_rs::sign::any_ecdsa_type(&self.key).expect("Cannot extract key"),
-            ocsp: None,
-        };
-        Some(Arc::new(certified_key))
-    }
-}
-
-pub struct TcpServer {
-    local_ip: IpAddr,
-    loaded_configuration: ServerConfig,
-    current_acceptor: Arc<TlsAcceptor>,
-    //socket_addr to device_id
-    connected_devices: Arc<Mutex<HashMap<String, TcpPeer>>>,
-    pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
-}
-
-pub struct TcpPeer {
-    device_id: String,
-    connection: Mutex<ServerConnection>,
-    connection_status: ConnectionState,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ConnectionRequestQuery {
-    InitialRequest {
-        device_id: String,
-    },
-    ChallengeRequest {
-        device_id: String,
-        nonce: Vec<u8>,
-    },
-    ChallengeResponse {
-        device_id: String,
-        //encoded BLAKE3 x ed25519 string
-        response: Vec<u8>,
-    },
-    AcceptConnection(String),
-    RejectConnection(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ServerActivity {
-    SendChallenge { device_id: String },
-    VerifiedChallenge { device_id: String },
-}
-
-#[derive(Clone, PartialEq, Default)]
-pub enum ConnectionState {
-    #[default]
-    Unknown,
-    Denied,
-    Access,
-    Pending,
-}
-
-impl TcpServer {
-    fn new(
-        server_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
-    ) -> Result<TcpServer, Box<dyn Error + Send + Sync>> {
-        let validation = validate_server_cert_present();
-        if !validation {
-            let res = generate_server_ca_keys();
-            if res.is_err() {
-                return Err(Box::new(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Server certificates are invalid, try to run [regenerate]",
-                )));
-            }
-        }
-        let configuration = Self::create_server_config()?;
-        Ok(TcpServer {
-            local_ip: get_local_ip().unwrap(),
-            loaded_configuration: configuration.clone(),
-            current_acceptor: Arc::new(TlsAcceptor::from(Arc::new(configuration))),
-            connected_devices: Arc::new(Mutex::new(HashMap::new())),
-            bounded_channel: server_channel,
-        })
-    }
-
-    fn create_server_config() -> io::Result<ServerConfig> {
-        let server_certs = load_cert_der()?;
-        let server_key = load_private_key_der()?;
-
-        let server_ca_verification = load_cas(&get_server_cert_storage().join(CA_CERT_FILE_NAME))?;
-
-        let client_cert_verifier: Arc<dyn ClientCertVerifier> = {
-            WebPkiClientVerifier::builder(Arc::new(server_ca_verification))
-                .build()
-                .map_err(|e| {
-                    io::Error::new(
-                        ErrorKind::InvalidInput,
-                        format!("Failed to build client verifier: {:?}", e),
-                    )
-                })?
-        };
-
-        let server_cert_resolver = Arc::new(StaticCertResolver {
-            certs: vec![server_certs],
-            key: server_key,
-        });
-
-        let config = ServerConfig::builder()
-            .with_client_cert_verifier(client_cert_verifier)
-            .with_cert_resolver(server_cert_resolver);
-
-        Ok(config)
-    }
 }
 
 pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -258,7 +134,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                                 peer_addr,
                                 connection,
                             )
-                            .await;
+                                .await;
                         }
                     }
                 }
@@ -422,3 +298,5 @@ async fn is_tcp_port_available(port: u16) -> bool {
         Err(_) => false,
     }
 }
+
+mod test {}

@@ -2,9 +2,9 @@ use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
 use crate::device_manager::{DefaultDeviceManager, get_device};
 use crate::keychain;
-use crate::server::{ConnectionRequestQuery, DefaultServer, ServerActivity, TcpServer};
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
+use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, TcpPeer, TcpServer};
 use DeviceChallengeStatus::Active;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
@@ -27,6 +27,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
+use crate::server::DefaultServer;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
