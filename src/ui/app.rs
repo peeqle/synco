@@ -1,21 +1,23 @@
-use std::time::Duration;
-use tokio::time::sleep;
+use super::{files, logs, network};
+use crate::consts::DeviceId;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Terminal, Frame,
-};
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io;
-use crate::consts::DeviceId;
-use super::{network, files, logs};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
+use crate::device_manager::DefaultDeviceManager;
 
 pub struct SyncoUI {
     pub should_quit: bool,
@@ -82,9 +84,9 @@ impl SyncoUI {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Header
-                Constraint::Min(0),     // Main content
-                Constraint::Length(3),  // Footer
+                Constraint::Length(3), // Header
+                Constraint::Min(0),    // Main content
+                Constraint::Length(3), // Footer
             ])
             .split(f.area());
 
@@ -94,29 +96,44 @@ impl SyncoUI {
     }
 
     fn draw_header(&self, f: &mut Frame, area: Rect) {
-        let header = Paragraph::new(format!("Synco - P2P File Sync | Device ID: {}", &DeviceId[..8]))
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL));
+        let header = Paragraph::new(format!(
+            "Synco - P2P File Sync | Device ID: {}",
+            &DeviceId[..8]
+        ))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL));
         f.render_widget(header, area);
     }
 
     fn draw_main_content(&self, f: &mut Frame, area: Rect) {
         let tabs = ["[1] Network", "[2] Files", "[3] Logs"];
-        let tab_titles: Vec<Line> = tabs.iter().enumerate().map(|(i, &tab)| {
-            if i == self.selected_tab {
-                Line::from(Span::styled(tab, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
-            } else {
-                Line::from(Span::styled(tab, Style::default().fg(Color::White)))
-            }
-        }).collect();
+        let tab_titles: Vec<Line> = tabs
+            .iter()
+            .enumerate()
+            .map(|(i, &tab)| {
+                if i == self.selected_tab {
+                    Line::from(Span::styled(
+                        tab,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(Span::styled(tab, Style::default().fg(Color::White)))
+                }
+            })
+            .collect();
 
         let tab_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
 
-        let tab_bar = Paragraph::new(tab_titles)
-            .style(Style::default().fg(Color::White));
+        let tab_bar = Paragraph::new(tab_titles).style(Style::default().fg(Color::White));
         f.render_widget(tab_bar, tab_chunks[0]);
 
         match self.selected_tab {
@@ -136,6 +153,19 @@ impl SyncoUI {
 }
 
 pub async fn start_ui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let device_manager = Arc::clone(&DefaultDeviceManager);
+    let notifier = Arc::clone(&device_manager.notify);
+    tokio::select! {
+            _ = notifier.notified() => {
+                println!("Список устройств изменился (через Notify), перерисовываем UI!");
+            },
+            _ = sleep(Duration::from_millis(500)) => {
+                // Если нет изменений, можно все равно перерисовывать,
+                // например, для анимаций или обновления времени.
+            }
+            // Здесь могут быть другие события
+        }
+    
     let mut ui = SyncoUI::new();
     ui.run().await
-} 
+}

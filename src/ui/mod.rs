@@ -1,6 +1,6 @@
 mod app;
-mod network;
 mod files;
 mod logs;
+mod network;
 
 pub use app::{SyncoUI, start_ui};

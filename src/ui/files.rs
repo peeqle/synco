@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, area: Rect) {
@@ -21,7 +21,11 @@ fn draw_file_list(f: &mut Frame, area: Rect) {
     let files: Vec<ListItem> = Vec::new();
 
     let file_list = List::new(files)
-        .block(Block::default().title("Synchronized Files").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Synchronized Files")
+                .borders(Borders::ALL),
+        )
         .style(Style::default().fg(Color::White));
 
     f.render_widget(file_list, area);
@@ -34,8 +38,12 @@ fn draw_file_operations(f: &mut Frame, area: Rect) {
     ];
 
     let operations_widget = Paragraph::new(operations)
-        .block(Block::default().title("File Operations").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("File Operations")
+                .borders(Borders::ALL),
+        )
         .style(Style::default().fg(Color::White));
 
     f.render_widget(operations_widget, area);
-} 
+}

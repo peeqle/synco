@@ -1,22 +1,24 @@
+use crate::NetError;
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::DeviceChallengeStatus::Active;
-use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager, DeviceChallengeStatus};
-use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
-use crate::device_manager::{get_device, DefaultDeviceManager};
-use crate::keychain::{
-    generate_server_ca_keys, load_cert_der, load_private_key_der,
+use crate::challenge::{
+    ChallengeEvent, DefaultChallengeManager, DeviceChallengeStatus, generate_challenge,
 };
+use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
+use crate::device_manager::{DefaultDeviceManager, get_device};
+use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
 use crate::server::ConnectionRequestQuery::RejectConnection;
 use crate::server::ConnectionState::{Access, Denied, Pending, Unknown};
-use crate::utils::{decrypt_with_passphrase, get_server_cert_storage, load_cas, validate_server_cert_present};
-use crate::NetError;
+use crate::utils::{
+    decrypt_with_passphrase, get_server_cert_storage, load_cas, validate_server_cert_present,
+};
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig, ServerConnection};
+use rustls::{ServerConfig, ServerConnection, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task;
 use tokio_rustls::TlsAcceptor;
 
@@ -176,9 +178,9 @@ impl TcpServer {
 pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
     info!("Starting server...");
     let res = tokio::try_join!(
-             tokio::spawn(start_server(Arc::clone(&server))),
+        tokio::spawn(start_server(Arc::clone(&server))),
         tokio::spawn(listen_actions(Arc::clone(&server))),
-        );
+    );
 
     match res {
         Ok((start_server_result, listen_actions_result)) => {
@@ -234,11 +236,14 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                             let mtx = server_arc.connected_devices.lock().await;
                             let server_known_device = mtx.get(&connecting_device.device_id);
 
-                            server_known_device.is_some() && server_known_device.unwrap().connection_status != Denied
+                            server_known_device.is_some()
+                                && server_known_device.unwrap().connection_status != Denied
                         };
 
                         if !can_connect {
-                            match serde_json::to_vec(&RejectConnection("You cannot connect to that machine".to_string())) {
+                            match serde_json::to_vec(&RejectConnection(
+                                "You cannot connect to that machine".to_string(),
+                            )) {
                                 Ok(res) => {
                                     connection.writer().write(&res).expect("Cannot send");
                                 }
@@ -252,7 +257,8 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                                 connecting_device.clone(),
                                 peer_addr,
                                 connection,
-                            ).await;
+                            )
+                            .await;
                         }
                     }
                 }
@@ -274,7 +280,10 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Se
     }
 }
 
-async fn handle_receiver_message(server: Arc<TcpServer>, message: ServerActivity) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn handle_receiver_message(
+    server: Arc<TcpServer>,
+    message: ServerActivity,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     match message {
         ServerActivity::SendChallenge { device_id } => {
             let mut cp = server.connected_devices.lock().await;
@@ -295,10 +304,16 @@ async fn handle_receiver_message(server: Arc<TcpServer>, message: ServerActivity
                 }
 
                 if device_connection.connection_status == Denied {
-                    return Err(Box::new(io::Error::new(ErrorKind::AlreadyExists, "Connection is denied")));
+                    return Err(Box::new(io::Error::new(
+                        ErrorKind::AlreadyExists,
+                        "Connection is denied",
+                    )));
                 }
                 if device_connection.connection_status == Access {
-                    return Err(Box::new(io::Error::new(ErrorKind::AlreadyExists, "Connection is already opened")));
+                    return Err(Box::new(io::Error::new(
+                        ErrorKind::AlreadyExists,
+                        "Connection is already opened",
+                    )));
                 }
             }
         }
@@ -340,10 +355,13 @@ async fn handle_client_actions(
                 ConnectionRequestQuery::InitialRequest { .. } => {}
                 ConnectionRequestQuery::ChallengeRequest { .. } => {}
                 ConnectionRequestQuery::ChallengeResponse { .. } => {
-                    match default_challenge_manager.get_sender()
+                    match default_challenge_manager
+                        .get_sender()
                         .send(ChallengeEvent::ChallengeVerification {
-                            connection_response: query
-                        }).await {
+                            connection_response: query,
+                        })
+                        .await
+                    {
                         Ok(_) => {}
                         Err(_) => {}
                     };
@@ -361,15 +379,16 @@ async fn handle_client_actions(
     }
 }
 
-async fn send_challenge(device: DiscoveredDevice, connection: &mut ServerConnection) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn send_challenge(
+    device: DiscoveredDevice,
+    connection: &mut ServerConnection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     if let Ok(ser) = get_serialized_challenge(device.clone()).await {
         if let Err(e) = connection.writer().write_all(&ser) {
             eprintln!("Failed to write challenge: {}", e);
             Err(Box::new(io::Error::new(
                 ErrorKind::Interrupted,
-                format!(
-                    "Failed to write challenge: {}", e
-                ),
+                format!("Failed to write challenge: {}", e),
             )))
         } else {
             println!("Sent challenge to: {}", device.device_id.to_string());
@@ -392,7 +411,6 @@ async fn get_serialized_challenge(
     Ok(serialized)
 }
 
-
 async fn is_tcp_port_available(port: u16) -> bool {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
@@ -401,8 +419,6 @@ async fn is_tcp_port_available(port: u16) -> bool {
             drop(listener);
             true
         }
-        Err(_) => {
-            false
-        }
+        Err(_) => false,
     }
 }

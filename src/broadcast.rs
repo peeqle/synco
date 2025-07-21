@@ -4,12 +4,12 @@ use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::DeviceId;
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use log::{error, info};
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, sleep};
 
@@ -120,34 +120,34 @@ pub async fn start_listener() -> Result<(), NetError> {
                     read_guard.clone()
                 };
 
-                if !(known_devices.contains_key(&current_device_id)
-                    && known_devices
+                if !known_devices.contains_key(&current_device_id) {
+                    if known_devices
                         .get(&current_device_id)
                         .take_if(|x| x.state == DeviceConnectionState::OPEN)
-                        .is_some())
-                {
-                    info!(
-                        "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
-                        msg.device_id, msg.listening_port, remote_addr
-                    );
+                        .is_some()
+                    {
+                        info!(
+                            "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
+                            msg.device_id, msg.listening_port, remote_addr
+                        );
 
-                    //generate challenge
-                    if msg.wants_to_connect {
-                        challenge_manager
-                            .get_sender()
-                            .send(ChallengeEvent::NewDevice {
-                                device_id: msg.device_id.clone(),
-                            })
-                            .await?;
+                        //generate challenge
+                        if msg.wants_to_connect {
+                            challenge_manager
+                                .get_sender()
+                                .send(ChallengeEvent::NewDevice {
+                                    device_id: msg.device_id.clone(),
+                                })
+                                .await?;
+                        }
                     }
+                    device_manager_sender
+                        .send(DeviceManagerQuery::DiscoveredDevice {
+                            device_id: msg.device_id.clone(),
+                            socket_addr: remote_addr,
+                        })
+                        .await?;
                 }
-                device_manager_sender
-                    .send(DeviceManagerQuery::DiscoveredDevice {
-                        device_id: msg.device_id.clone(),
-                        socket_addr: remote_addr,
-                    })
-                    .await?;
-                // }
             }
             Err(e) => {
                 error!(

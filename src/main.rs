@@ -1,15 +1,15 @@
+use crate::challenge::{DefaultChallengeManager, cleanup};
+use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
+use crate::device_manager::DefaultDeviceManager;
+use crate::machine_utils::get_local_ip;
+use crate::server::{DefaultServer, run, start_server};
+use crate::state::InternalState;
+use crate::ui::start_ui;
+use log::info;
 use std::error::Error;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use log::info;
-use crate::challenge::{cleanup, DefaultChallengeManager};
-use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
-use crate::device_manager::DefaultDeviceManager;
-use crate::machine_utils::get_local_ip;
-use crate::server::{run, start_server, DefaultServer};
-use crate::state::InternalState;
-use crate::ui::start_ui;
 use tokio::time::sleep;
 
 mod balancer;
@@ -60,9 +60,7 @@ async fn main() -> Result<(), NetError> {
             tokio::spawn(async move { start_server(default_server).await }),
             tokio::spawn(async move { device_manager_arc_for_join.start().await }),
             tokio::spawn(cleanup()),
-            tokio::spawn(async move {
-                start_ui().await
-            })
+            tokio::spawn(async move { start_ui().await })
         );
     } else {
         info!("Starting in headless mode...");

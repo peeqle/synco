@@ -1,19 +1,20 @@
 use crate::broadcast::DiscoveredDevice;
 use lazy_static::lazy_static;
+use log::info;
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar};
 use std::time::Duration;
-use log::info;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, Notify};
 use tokio::time::{Instant, sleep};
 
 lazy_static! {
     pub static ref DefaultDeviceManager: Arc<DeviceManager> = {
         let (sender, receiver) = mpsc::channel(300);
         Arc::new(DeviceManager {
+            notify: Arc::new(Notify::new()),
             known_devices: RwLock::new(HashMap::new()),
             bounded_channel: (sender, Mutex::new(receiver)),
         })
@@ -21,12 +22,12 @@ lazy_static! {
 }
 
 pub struct DeviceManager {
-    //id
-    pub(crate) known_devices: RwLock<HashMap<String, DiscoveredDevice>>,
-    pub(crate) bounded_channel: (
+    pub known_devices: RwLock<HashMap<String, DiscoveredDevice>>,
+    pub bounded_channel: (
         Sender<DeviceManagerQuery>,
         Mutex<Receiver<DeviceManagerQuery>>,
     ),
+    pub notify: Arc<Notify>,
 }
 pub enum DeviceManagerQuery {
     /**
@@ -62,29 +63,30 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
         let mut r = receiver_mutex.lock().await;
         tokio::select! {
-            Some(message) = r.recv() => {
-                match message {
-            DeviceManagerQuery::DiscoveredDevice { device_id, socket_addr } => {
-
-                        let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
-
-                         let mut devices = known_devices.write().await;
-                match devices.entry(device_id) {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        entry.get_mut().update_last_seen();
-                        println!("Device Manager: Updated last seen for device {}", entry.key());
-                        // self.device_updates_tx.send(DeviceUpdate::Updated(entry.get().clone())).await.ok();
-                    }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        println!("Device Manager: Discovered new device: {:?}", new_device);
-                        entry.insert(new_device.clone());
-                        // self.device_updates_tx.send(DeviceUpdate::Added(new_device)).await.ok();
-
-                                }
-                            }
+                 Some(message) = r.recv() => {
+            match message {
+                DeviceManagerQuery::DiscoveredDevice { device_id, socket_addr } => {
+                    let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
+    
+                    let mut devices = known_devices.write().await;
+                    match devices.entry(device_id) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().update_last_seen();
+                            println!("Device Manager: Updated last seen for device {}", entry.key());
+                            // self.device_updates_tx.send(DeviceUpdate::Updated(entry.get().clone())).await.ok();
                         }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            println!("Device Manager: Discovered new device: {:?}", new_device);
+                            entry.insert(new_device.clone());
+                            // self.device_updates_tx.send(DeviceUpdate::Added(new_device)).await.ok();
+    
+                        }
+                    }
                 }
+                    
             }
+                device_manager_arc.notify.notify_waiters();
+        }
             else => break
         }
     }

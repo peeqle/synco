@@ -131,8 +131,7 @@ pub fn encrypt_with_passphrase(
     let mut key_bytes = [0u8; 16];
     pbkdf2_hmac::<Sha256>(passphrase, &salt, 100_000, &mut key_bytes);
 
-    let cipher = Aes128Gcm::new_from_slice(&key_bytes)
-        .map_err(|_| aes_gcm::Error)?;
+    let cipher = Aes128Gcm::new_from_slice(&key_bytes).map_err(|_| aes_gcm::Error)?;
 
     let mut iv_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut iv_bytes);
@@ -151,8 +150,7 @@ pub fn decrypt_with_passphrase(
     let mut key_bytes = [0u8; 16];
     pbkdf2_hmac::<Sha256>(passphrase, salt_bytes, 100_000, &mut key_bytes);
 
-    let cipher = Aes128Gcm::new_from_slice(&key_bytes)
-        .map_err(|_| aes_gcm::Error)?;
+    let cipher = Aes128Gcm::new_from_slice(&key_bytes).map_err(|_| aes_gcm::Error)?;
 
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher.decrypt(nonce, ciphertext_with_tag.as_ref())?;
@@ -172,14 +170,16 @@ mod test {
 
         let data_to_encrypt = nonce_hash.as_bytes();
 
-        let enc_response = encrypt_with_passphrase(data_to_encrypt, &passphrase.as_bytes()).expect("Cannot encrypt");
+        let enc_response = encrypt_with_passphrase(data_to_encrypt, &passphrase.as_bytes())
+            .expect("Cannot encrypt");
 
         let decr_response = decrypt_with_passphrase(
             &enc_response.0,
             &enc_response.1,
             &enc_response.2,
             passphrase.as_bytes(),
-        ).expect("Cannot decrypt");
+        )
+        .expect("Cannot decrypt");
 
         println!("Decrypted data: {:?}", decr_response);
         assert_eq!(decr_response.as_slice(), data_to_encrypt);

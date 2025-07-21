@@ -1,6 +1,6 @@
 use local_ip_address::list_afinet_netifas;
-use std::net::{IpAddr, Ipv4Addr};
 use log::info;
+use std::net::{IpAddr, Ipv4Addr};
 
 pub fn get_local_ip() -> Option<IpAddr> {
     let ifas = list_afinet_netifas().unwrap();

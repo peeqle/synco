@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, area: Rect) {
@@ -18,4 +18,4 @@ pub fn draw(f: &mut Frame, area: Rect) {
         .scroll((0, 0));
 
     f.render_widget(logs_widget, area);
-} 
+}
