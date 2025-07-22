@@ -162,6 +162,7 @@ async fn handle_receiver_message(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match message {
         ServerActivity::SendChallenge { device_id } => {
+            info!("Received new connection request from: {}", &device_id);
             let mut cp = server.connected_devices.lock().await;
             let mut _device = cp.get_mut(&device_id);
 

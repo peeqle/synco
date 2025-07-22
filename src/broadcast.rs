@@ -107,44 +107,34 @@ pub async fn start_listener() -> Result<(), NetError> {
                     .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
                         SocketAddr::new(ip, msg.listening_port)
                     });
-                info!(
-                    "device {:?} device id : {:?} sender id: {:?}",
-                    msg,
-                    device_id(),
-                    current_device_id
-                );
 
                 if msg.device_id != current_device_id {
+                    info!(
+                    "device {:?} device id : {:?} sender id: {:?}",
+                    msg,
+                    msg.device_id,
+                    current_device_id
+                );
                     let known_devices = {
                         let read_guard = device_manager_arc.known_devices.read().await;
                         read_guard.clone()
                     };
 
                     if !known_devices.contains_key(&current_device_id) {
-                        if known_devices
-                            .get(&current_device_id)
-                            .take_if(|x| x.state == DeviceConnectionState::OPEN)
-                            .is_some()
-                        {
-                            info!(
-                                "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
-                                msg.device_id, msg.listening_port, remote_addr
-                            );
-
-                            //generate challenge
-                            if msg.wants_to_connect {
-                                challenge_manager
-                                    .get_sender()
-                                    .send(ChallengeEvent::NewDevice {
-                                        device_id: msg.device_id.clone(),
-                                    })
-                                    .await?;
-                            }
-                        }
                         device_manager_sender
                             .send(DeviceManagerQuery::DiscoveredDevice {
                                 device_id: msg.device_id.clone(),
                                 socket_addr: remote_addr,
+                            })
+                            .await?;
+                    }
+
+                    //generate challenge
+                    if msg.wants_to_connect && !challenge_manager.can_request_new_connection(&msg.device_id).await {
+                        challenge_manager
+                            .get_sender()
+                            .send(ChallengeEvent::NewDevice {
+                                device_id: msg.device_id.clone(),
                             })
                             .await?;
                     }

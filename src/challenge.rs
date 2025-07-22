@@ -1,11 +1,11 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
-use crate::device_manager::{DefaultDeviceManager, get_device};
+use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
+use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, TcpPeer, TcpServer};
+use crate::server::DefaultServer;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
-use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, TcpPeer, TcpServer};
-use DeviceChallengeStatus::Active;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::aes::Aes128;
@@ -14,8 +14,8 @@ use lazy_static::lazy_static;
 use log::{debug, info};
 use rustls::compress::default_cert_compressors;
 use std::any::Any;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::io::{ErrorKind, Read};
@@ -24,10 +24,10 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock, mpsc};
-use tokio::time::{Instant, sleep};
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
-use crate::server::DefaultServer;
+use DeviceChallengeStatus::Active;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -108,6 +108,11 @@ impl ChallengeManager {
     pub fn get_sender(&self) -> Sender<ChallengeEvent> {
         self.bounded_channel.0.clone()
     }
+
+    pub async fn can_request_new_connection(&self, device_id: &String) -> bool {
+        let challenges = self.current_challenges.read().await;
+        challenges.contains_key(device_id)
+    }
 }
 
 pub async fn run(manager: Arc<ChallengeManager>) {
@@ -164,6 +169,8 @@ pub async fn challenge_listener(
     manager: Arc<ChallengeManager>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let challenge_manager = manager.clone();
+    //todo replace with dyn servers
+    let _server = Arc::clone(&DefaultServer);
 
     let receiver_mutex = &challenge_manager.bounded_channel.1;
     loop {
@@ -171,7 +178,12 @@ pub async fn challenge_listener(
         tokio::select! {
            Some(message) = receiver.recv() => {
                 match message {
-                    ChallengeEvent::NewDevice { device_id } => {}
+                    ChallengeEvent::NewDevice { device_id } => {
+                        _server.bounded_channel.0
+                        .send(ServerActivity::SendChallenge {
+                            device_id: device_id.clone()
+                        }).await.expect(format!("Cannot send request for establishing new connection: {}", device_id).as_str());
+                    }
                     ChallengeEvent::ChallengeVerification { connection_response } => {
                         if let ConnectionRequestQuery::ChallengeResponse { device_id, response } = connection_response {
                             verify_challenge(device_id, response).await?;
@@ -195,14 +207,14 @@ async fn verify_challenge(
 
     match challenge {
         Some(Active {
-            socket_addr,
-            nonce,
-            nonce_hash,
-            salt,
-            passphrase,
-            mut attempts,
-            ttl,
-        }) => {
+                 socket_addr,
+                 nonce,
+                 nonce_hash,
+                 salt,
+                 passphrase,
+                 mut attempts,
+                 ttl,
+             }) => {
             match decrypt_with_passphrase(
                 verification_body.as_slice(),
                 &nonce.try_into().unwrap(),
