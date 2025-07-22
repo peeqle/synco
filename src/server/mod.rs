@@ -32,11 +32,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
+use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 mod tls_utils;
@@ -92,7 +93,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
         task::spawn(async move {
             match acceptor_clone.accept(socket).await {
                 Ok(mut tls_stream) => {
-                    let (tcp_stream, mut connection) = tls_stream.get_mut();
+                    let (tcp_stream, connection) = tls_stream.get_mut();
 
                     let connecting_device_option: Option<DiscoveredDevice> = {
                         let discovered_devices_guard =
@@ -113,28 +114,18 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                             let server_known_device = mtx.get(&connecting_device.device_id);
 
                             server_known_device.is_some()
-                                && server_known_device.unwrap().connection_status != Denied
+                                && server_known_device.unwrap().connection_status != Denied && server_known_device.unwrap().connection_status != Access
                         };
 
-                        if !can_connect {
-                            match serde_json::to_vec(&RejectConnection(
-                                "You cannot connect to that machine".to_string(),
-                            )) {
-                                Ok(res) => {
-                                    connection.writer().write(&res).expect("Cannot send");
-                                }
-                                Err(_) => {
-                                    error!("Cannot serialize Rejection response");
-                                }
-                            }
-                        } else {
-                            handle_client_actions(
+                        if can_connect {
+                            if let Err(e) = open_stream(
                                 server_arc.clone(),
-                                connecting_device.clone(),
-                                peer_addr,
-                                connection,
-                            )
-                                .await;
+                                connecting_device.device_id.clone(),
+                                tls_stream,
+                            ).await {
+                                error!("Failed to open stream for device {}: {}",
+                       connecting_device.device_id, e);
+                            }
                         }
                     }
                 }
@@ -144,6 +135,84 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
             }
         });
     }
+}
+
+async fn open_stream(
+    server: Arc<TcpServer>,
+    device_id: String,
+    tls_stream: TlsStream<TcpStream>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if server.connected_devices.lock().await.contains_key(&device_id) {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "Peer connection already established",
+        )));
+    }
+    
+    let (sender, receiver) = mpsc::channel::<String>(100);
+
+    let tcp_peer = TcpPeer {
+        device_id: device_id.clone(),
+        connection: Arc::new(Mutex::new(tls_stream)),
+        connection_status: Unknown,
+        sender,
+    };
+
+    server.connected_devices.lock().await.insert(device_id.clone(), tcp_peer);
+
+    let server_clone = server.clone();
+    let device_id_clone = device_id.clone();
+    tokio::spawn(async move {
+        handle_client_actions(
+            server_clone,
+            device_id_clone,
+            receiver,
+        ).await;
+    });
+
+    info!("Successfully created and opened TcpPeer connection");
+    Ok(())
+}
+
+async fn handle_client_actions(
+    server: Arc<TcpServer>,
+    device_id: String,
+    mut client_receiver: Receiver<String>,
+) {
+    info!("Started client handler for device: {}", device_id);
+
+    while let Some(message) = client_receiver.recv().await {
+        info!("Received message from {}: {}", device_id, message);
+
+        match serde_json::from_str::<ConnectionRequestQuery>(&message) {
+            Ok(query) => {
+                match query {
+                    ConnectionRequestQuery::InitialRequest { .. } => {}
+                    ConnectionRequestQuery::ChallengeRequest { .. } => {}
+                    ConnectionRequestQuery::ChallengeResponse { .. } => {
+                        if let Err(e) = DefaultChallengeManager
+                            .get_sender()
+                            .send(ChallengeEvent::ChallengeVerification {
+                                connection_response: query,
+                            })
+                            .await
+                        {
+                            error!("Failed to send challenge verification: {}", e);
+                        }
+                    }
+                    ConnectionRequestQuery::AcceptConnection(_) => {}
+                    ConnectionRequestQuery::RejectConnection(_) => {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Error processing message from {}: {}", device_id, err);
+            }
+        }
+    }
+    info!("Client handler for device {} has ended", device_id);
+    server.connected_devices.lock().await.remove(&device_id);
 }
 
 async fn listen_actions(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -162,7 +231,7 @@ async fn handle_receiver_message(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match message {
         ServerActivity::SendChallenge { device_id } => {
-            info!("Received new connection request from: {}", &device_id);
+            info!("Received new connection request to: {}", &device_id);
             let mut cp = server.connected_devices.lock().await;
             let mut _device = cp.get_mut(&device_id);
 
@@ -203,57 +272,6 @@ async fn handle_receiver_message(
         }
     }
     Ok(())
-}
-
-async fn handle_client_actions(
-    server: Arc<TcpServer>,
-    connecting_device: DiscoveredDevice,
-    peer_arc: SocketAddr,
-    connection: &mut ServerConnection,
-) {
-    let arc = server.connected_devices.clone();
-    let guard = arc.lock().await;
-    let default_challenge_manager = Arc::clone(&DefaultChallengeManager);
-
-    let mut buffer = vec![0; 4096];
-    let mut result = vec![];
-
-    loop {
-        let bytes_read = connection.reader().read(&mut buffer).unwrap();
-        if bytes_read == 0 {
-            break;
-        }
-        result.extend_from_slice(&buffer[..bytes_read]);
-    }
-
-    if !result.is_empty() {
-        match serde_json::from_slice::<ConnectionRequestQuery>(result.as_slice()) {
-            Ok(query) => match query {
-                ConnectionRequestQuery::InitialRequest { .. } => {}
-                ConnectionRequestQuery::ChallengeRequest { .. } => {}
-                ConnectionRequestQuery::ChallengeResponse { .. } => {
-                    match default_challenge_manager
-                        .get_sender()
-                        .send(ChallengeEvent::ChallengeVerification {
-                            connection_response: query,
-                        })
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(_) => {}
-                    };
-                }
-                ConnectionRequestQuery::AcceptConnection(_) => {}
-                ConnectionRequestQuery::RejectConnection(_) => {}
-            },
-            Err(err) => {
-                println!(
-                    "[SERVER] Error occurred while processing client's message: {}",
-                    err
-                )
-            }
-        };
-    }
 }
 
 async fn send_challenge(

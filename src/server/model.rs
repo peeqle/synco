@@ -14,8 +14,10 @@ use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 impl TcpServer {
@@ -107,8 +109,9 @@ pub struct TcpServer {
 
 pub struct TcpPeer {
     pub device_id: String,
-    pub connection: Mutex<ServerConnection>,
+    pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
+    pub sender: Sender<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
