@@ -1,3 +1,5 @@
+mod connection;
+
 use crate::utils::get_client_cert_storage_server;
 use rustls::RootCertStore;
 use std::fs::File;

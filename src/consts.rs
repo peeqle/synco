@@ -2,11 +2,10 @@ use crate::keychain::device_id;
 use der::asn1::ObjectIdentifier;
 use lazy_static::lazy_static;
 use std::error::Error;
-use uuid::Uuid;
 
 lazy_static! {
     pub static ref DeviceId: String = device_id()
-        .unwrap_or_else(|| Uuid::new_v4().to_string())
+        .expect("Cannot create device id, try again")
         .to_string();
 }
 

@@ -1,4 +1,5 @@
 use local_ip_address::list_afinet_netifas;
+use log::info;
 use std::net::{IpAddr, Ipv4Addr};
 
 pub fn get_local_ip() -> Option<IpAddr> {
@@ -8,7 +9,7 @@ pub fn get_local_ip() -> Option<IpAddr> {
         .iter()
         .find(|(name, ipaddr)| (*name).contains("wlp") && matches!(ipaddr, IpAddr::V4(_)))
     {
-        println!("Using current device WLP address: {:?}", ipaddr);
+        info!("Using current device WLP address: {:?}", ipaddr);
         return Some(*ipaddr);
     }
 

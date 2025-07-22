@@ -36,7 +36,6 @@ lazy_static! {
 
 pub fn sign(msg: String) -> Result<Signature, Box<dyn Error + Send + Sync>> {
     let cp = Arc::clone(&DEVICE_SIGNING_KEY);
-
     cp.try_sign(msg.as_bytes())
         .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
 }
@@ -117,7 +116,7 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
     let private_key_bytes = signing_key.to_bytes();
 
-    let mut app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir();
 
     let key_file_path = app_data_dir.join(SIGNING_KEY);
     let mut file = File::create(&key_file_path)?;

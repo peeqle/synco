@@ -1,9 +1,10 @@
 use crate::broadcast::DeviceConnectionState::NEW;
-use crate::connection::{ChallengeEvent, DefaultChallengeManager};
+use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::DeviceId;
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
 use crate::NetError;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::net::{IpAddr, SocketAddr};
@@ -42,7 +43,7 @@ impl DiscoveryMessage {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredDevice {
     pub device_id: String,
     pub connect_addr: SocketAddr,
@@ -86,7 +87,7 @@ const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 pub async fn start_listener() -> Result<(), NetError> {
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
-    println!("Broadcast listener started on {}", listen_addr);
+    info!("Broadcast listener started on {}", listen_addr);
 
     let mut buf = vec![0u8; 1024];
 
@@ -106,52 +107,41 @@ pub async fn start_listener() -> Result<(), NetError> {
                     .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
                         SocketAddr::new(ip, msg.listening_port)
                     });
-                println!(
-                    "device {:?} device id : {:?} sender id: {:?}",
-                    msg,
-                    device_id(),
-                    current_device_id
-                );
 
                 if msg.device_id != current_device_id {
+                    info!(
+                    "device {:?} device id : {:?} sender id: {:?}",
+                    msg,
+                    msg.device_id,
+                    current_device_id
+                );
                     let known_devices = {
-                        let read_guard = device_manager_arc.known_devices.read().unwrap();
+                        let read_guard = device_manager_arc.known_devices.read().await;
                         read_guard.clone()
                     };
 
-                    if !(known_devices.contains_key(&current_device_id)
-                        && known_devices
-                            .get(&current_device_id)
-                            .take_if(|x| x.state == DeviceConnectionState::OPEN)
-                            .is_some())
-                    {
-                        println!(
-                            "Received broadcast from Device ID: {}, Listening Port: {}, Peer Addr: {}",
-                            msg.device_id, msg.listening_port, remote_addr
-                        );
-
-                        //generate challenge
-                        if msg.wants_to_connect {
-                            challenge_manager
-                                .lock()
-                                .await
-                                .get_sender()
-                                .send(ChallengeEvent::NewDevice {
-                                    device_id: msg.device_id.clone(),
-                                })
-                                .await?;
-                        }
+                    if !known_devices.contains_key(&current_device_id) {
+                        device_manager_sender
+                            .send(DeviceManagerQuery::DiscoveredDevice {
+                                device_id: msg.device_id.clone(),
+                                socket_addr: remote_addr,
+                            })
+                            .await?;
                     }
-                    device_manager_sender
-                        .send(DeviceManagerQuery::DiscoveredDevice {
-                            device_id: msg.device_id.clone(),
-                            socket_addr: remote_addr,
-                        })
-                        .await?;
+
+                    //generate challenge
+                    if msg.wants_to_connect && !challenge_manager.can_request_new_connection(&msg.device_id).await {
+                        challenge_manager
+                            .get_sender()
+                            .send(ChallengeEvent::NewDevice {
+                                device_id: msg.device_id.clone(),
+                            })
+                            .await?;
+                    }
                 }
             }
             Err(e) => {
-                eprintln!(
+                error!(
                     "Failed to parse discovery message: {} from {}, message {}",
                     e, peer_addr, message_str
                 );
@@ -174,11 +164,11 @@ pub async fn start_broadcast_announcer(
         Some(local_ip),
         22000,
         Some(local_ip),
-        false,
+        true,
     );
     let serialized_message = serde_json::to_string(&message)?;
 
-    println!("Broadcast announcer started. Sending on {}", broadcast_addr);
+    info!("Broadcast announcer started. Sending on {}", broadcast_addr);
 
     loop {
         socket
