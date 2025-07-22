@@ -1,4 +1,4 @@
-use crate::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, NetworkEvent, UIEvent};
+use crate::ui::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, NetworkEvent, UIEvent};
 use crate::consts::{DEFAULT_LISTENING_PORT, DEFAULT_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use ratatui::{
@@ -97,7 +97,7 @@ impl Module for NetworkModule {
                 
                 Ok(EventResult::Continue)
             },
-            ModuleEvent::System(crate::chain::SystemEvent::Startup) => {
+            ModuleEvent::System(crate::ui::chain::SystemEvent::Startup) => {
                 // Запускаем обнаружение устройств
                 context.emit_event(ModuleEvent::Network(NetworkEvent::DeviceDiscovered(
                     "localhost".to_string()
@@ -300,7 +300,7 @@ impl NetworkModule {
 // Legacy function for backwards compatibility
 pub fn draw(f: &mut Frame, area: Rect) {
     let module = NetworkModule::new();
-    let context = crate::chain::ModuleContext::new(crate::chain::ModuleConfig {
+    let context = crate::ui::chain::ModuleContext::new(crate::ui::chain::ModuleConfig {
         enabled_modules: vec!["network".to_string()],
         module_settings: std::collections::HashMap::new(),
     });

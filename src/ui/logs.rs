@@ -1,4 +1,4 @@
-use crate::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, SystemEvent, UIEvent, NetworkEvent, FileSystemEvent};
+use crate::ui::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, SystemEvent, UIEvent, NetworkEvent, FileSystemEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -464,7 +464,7 @@ pub fn draw(f: &mut Frame, area: Rect) {
     module.add_log_entry(LogLevel::Info, "System".to_string(), 
         "Application started".to_string(), None);
     
-    let context = crate::chain::ModuleContext::new(crate::chain::ModuleConfig {
+    let context = crate::ui::chain::ModuleContext::new(crate::ui::chain::ModuleConfig {
         enabled_modules: vec!["logs".to_string()],
         module_settings: std::collections::HashMap::new(),
     });

@@ -1,4 +1,4 @@
-use crate::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, SystemEvent, UIEvent};
+use crate::ui::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, SystemEvent, UIEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},

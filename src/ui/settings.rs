@@ -1,4 +1,4 @@
-use crate::chain::{EventResult, Module, ModuleContext, ModuleError, ModuleEvent, ModuleMetadata, SystemEvent, UIEvent, UIModule};
+use crate::ui::chain::{EventResult, Module, ModuleContext, ModuleError, ModuleEvent, ModuleMetadata, SystemEvent, UIEvent, UIModule};
 use async_trait::async_trait;
 use crossterm::event::KeyEvent;
 use ratatui::{

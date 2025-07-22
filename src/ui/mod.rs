@@ -4,6 +4,7 @@ mod logs;
 mod network;
 mod performance;
 mod settings;
+mod chain;
 
 pub use app::start_ui;
 pub use files::FilesModule;

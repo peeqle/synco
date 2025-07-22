@@ -1,5 +1,5 @@
 use super::{FilesModule, LogsModule, NetworkModule, PerformanceModule, SettingsModule};
-use crate::chain::{ModuleConfig, ModuleEvent, ModuleManager, SystemEvent, UIEvent};
+use crate::ui::chain::{ModuleConfig, ModuleEvent, ModuleManager, SystemEvent, UIEvent};
 use crate::consts::DeviceId;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},

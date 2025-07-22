@@ -1,8 +1,8 @@
-use crate::challenge::{DefaultChallengeManager, cleanup};
-use crate::consts::{DEFAULT_LISTENING_PORT, DeviceId};
+use crate::challenge::{cleanup, DefaultChallengeManager};
+use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
-use crate::server::{DefaultServer, run, start_server};
+use crate::server::{run, start_server, DefaultServer};
 use crate::state::InternalState;
 use crate::ui::start_ui;
 use log::info;
@@ -25,7 +25,6 @@ mod server;
 mod state;
 mod ui;
 mod utils;
-mod chain;
 
 type NetError = Box<dyn Error + Send + Sync>;
 

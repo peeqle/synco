@@ -1,4 +1,4 @@
-use crate::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, FileSystemEvent, UIEvent};
+use crate::ui::chain::{UIModule, Module, ModuleContext, ModuleEvent, EventResult, ModuleError, ModuleMetadata, FileSystemEvent, UIEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -382,7 +382,7 @@ impl FilesModule {
 // Legacy function for backwards compatibility
 pub fn draw(f: &mut Frame, area: Rect) {
     let module = FilesModule::new();
-    let context = crate::chain::ModuleContext::new(crate::chain::ModuleConfig {
+    let context = crate::ui::chain::ModuleContext::new(crate::ui::chain::ModuleConfig {
         enabled_modules: vec!["files".to_string()],
         module_settings: std::collections::HashMap::new(),
     });
