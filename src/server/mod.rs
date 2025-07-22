@@ -5,11 +5,11 @@ use crate::challenge::{
 };
 use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
 use crate::device_manager::{get_device, DefaultDeviceManager};
-use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
+use crate::keychain::{device_id, generate_server_ca_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
 use crate::server::model::ConnectionRequestQuery::RejectConnection;
 use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
-use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, TcpPeer, TcpServer};
+use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, ServerTcpPeer, TcpServer};
 use crate::utils::{
     decrypt_with_passphrase, get_server_cert_storage, load_cas, validate_server_cert_present,
 };
@@ -92,9 +92,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
         let default_device_manager_clone = default_device_manager.clone();
         task::spawn(async move {
             match acceptor_clone.accept(socket).await {
-                Ok(mut tls_stream) => {
-                    let (tcp_stream, connection) = tls_stream.get_mut();
-
+                Ok(tls_stream) => {
                     let connecting_device_option: Option<DiscoveredDevice> = {
                         let discovered_devices_guard =
                             default_device_manager_clone.known_devices.read().await;
@@ -108,24 +106,28 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
 
                     if connecting_device_option.is_some() {
                         let connecting_device = connecting_device_option.unwrap();
+                        let mut connected_devices_arc = server_arc.connected_devices.lock().await;
 
-                        let can_connect = {
-                            let mtx = server_arc.connected_devices.lock().await;
-                            let server_known_device = mtx.get(&connecting_device.device_id);
+                        let (server_sender, server_receiver) = mpsc::channel::<String>(100);
 
-                            server_known_device.is_some()
-                                && server_known_device.unwrap().connection_status != Denied && server_known_device.unwrap().connection_status != Access
-                        };
+                        let device_connection = connected_devices_arc.entry(connecting_device.device_id.clone())
+                            .or_insert_with(|| ServerTcpPeer {
+                                device_id: connecting_device.device_id.clone(),
+                                connection: Arc::new(Mutex::new(tls_stream)),
+                                connection_status: Unknown,
+                                sender: server_sender,
+                            });
 
-                        if can_connect {
-                            if let Err(e) = open_stream(
-                                server_arc.clone(),
-                                connecting_device.device_id.clone(),
-                                tls_stream,
-                            ).await {
-                                error!("Failed to open stream for device {}: {}",
-                       connecting_device.device_id, e);
-                            }
+                        if device_connection.connection_status == Unknown {
+                            let server_clone = server_arc.clone();
+                            tokio::spawn(async move {
+                                info!("Peer connection established");
+                                handle_client_actions(
+                                    server_clone,
+                                    connecting_device.device_id.clone(),
+                                    server_receiver,
+                                ).await;
+                            });
                         }
                     }
                 }
@@ -137,51 +139,15 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
     }
 }
 
-async fn open_stream(
-    server: Arc<TcpServer>,
-    device_id: String,
-    tls_stream: TlsStream<TcpStream>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if server.connected_devices.lock().await.contains_key(&device_id) {
-        return Err(Box::new(io::Error::new(
-            ErrorKind::AlreadyExists,
-            "Peer connection already established",
-        )));
-    }
-    
-    let (sender, receiver) = mpsc::channel::<String>(100);
-
-    let tcp_peer = TcpPeer {
-        device_id: device_id.clone(),
-        connection: Arc::new(Mutex::new(tls_stream)),
-        connection_status: Unknown,
-        sender,
-    };
-
-    server.connected_devices.lock().await.insert(device_id.clone(), tcp_peer);
-
-    let server_clone = server.clone();
-    let device_id_clone = device_id.clone();
-    tokio::spawn(async move {
-        handle_client_actions(
-            server_clone,
-            device_id_clone,
-            receiver,
-        ).await;
-    });
-
-    info!("Successfully created and opened TcpPeer connection");
-    Ok(())
-}
 
 async fn handle_client_actions(
     server: Arc<TcpServer>,
     device_id: String,
-    mut client_receiver: Receiver<String>,
+    mut server_receiver: Receiver<String>,
 ) {
     info!("Started client handler for device: {}", device_id);
 
-    while let Some(message) = client_receiver.recv().await {
+    while let Some(message) = server_receiver.recv().await {
         info!("Received message from {}: {}", device_id, message);
 
         match serde_json::from_str::<ConnectionRequestQuery>(&message) {
@@ -240,12 +206,12 @@ async fn handle_receiver_message(
                 if device_connection.connection_status == Unknown {
                     if let Some(d_device) = get_device(device_id.clone()).await {
                         let mut mutex = device_connection.connection.lock().await;
-                        match send_challenge(d_device, &mut mutex).await {
-                            Ok(_) => {
-                                device_connection.connection_status = Pending;
-                            }
-                            Err(_) => {}
-                        }
+                        // match send_challenge(d_device, &mut mutex).await {
+                        //     Ok(_) => {
+                        //         device_connection.connection_status = Pending;
+                        //     }
+                        //     Err(_) => {}
+                        // }
                     }
                 }
 

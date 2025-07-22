@@ -22,6 +22,7 @@ pub const SIGNING_KEY: &str = "signing_key.bin";
 
 pub const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 
+pub const DISCOVERY_PORT: u16 = 21028;
 pub const DEFAULT_SERVER_PORT: u16 = 21029;
 pub const DEFAULT_LISTENING_PORT: u16 = 22001;
 
@@ -29,5 +30,6 @@ pub const BUFFER_SIZE: usize = 16 * 1024;
 
 pub const CLEANUP_DELAY: u64 = 15;
 pub const CHALLENGE_DEATH: u64 = 60;
+pub const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 
 pub type DAError = Box<dyn Error + Send + Sync>;

@@ -103,11 +103,11 @@ pub struct TcpServer {
     pub loaded_configuration: ServerConfig,
     pub current_acceptor: Arc<TlsAcceptor>,
     //socket_addr to device_id
-    pub connected_devices: Arc<Mutex<HashMap<String, TcpPeer>>>,
+    pub connected_devices: Arc<Mutex<HashMap<String, ServerTcpPeer>>>,
     pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
 }
 
-pub struct TcpPeer {
+pub struct ServerTcpPeer {
     pub device_id: String,
     pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
