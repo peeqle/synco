@@ -54,22 +54,11 @@ lazy_static! {
 
 pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
     info!("Starting server...");
-    let res = tokio::try_join!(
+    let res = tokio::join!(
         tokio::spawn(start_server(Arc::clone(&server))),
         tokio::spawn(listen_actions(Arc::clone(&server))),
     );
-
-    match res {
-        Ok((start_server_result, listen_actions_result)) => {
-            start_server_result?;
-            listen_actions_result?;
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Error in run: {:?}", e);
-            Err(e.into())
-        }
-    }
+    Ok(())
 }
 
 pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {

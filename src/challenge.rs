@@ -28,6 +28,8 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
+use crate::client::ClientActivity::OpenConnection;
+use crate::client::DefaultClientManager;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -170,7 +172,7 @@ pub async fn challenge_listener(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let challenge_manager = manager.clone();
     //todo replace with dyn servers
-    let _server = Arc::clone(&DefaultServer);
+    let _client = Arc::clone(&DefaultClientManager);
 
     let receiver_mutex = &challenge_manager.bounded_channel.1;
     loop {
@@ -179,10 +181,10 @@ pub async fn challenge_listener(
            Some(message) = receiver.recv() => {
                 match message {
                     ChallengeEvent::NewDevice { device_id } => {
-                        _server.bounded_channel.0
-                        .send(ServerActivity::SendChallenge {
+                        _client.bounded_channel.0
+                        .send(OpenConnection {
                             device_id: device_id.clone()
-                        }).await.expect(format!("Cannot send request for establishing new connection: {}", device_id).as_str());
+                        }).await.expect(&format!("Cannot send request for establishing new connection: {}", device_id));
                     }
                     ChallengeEvent::ChallengeVerification { connection_response } => {
                         if let ConnectionRequestQuery::ChallengeResponse { device_id, response } = connection_response {

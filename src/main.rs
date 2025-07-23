@@ -1,8 +1,9 @@
 use crate::challenge::{cleanup, DefaultChallengeManager};
+use crate::client::DefaultClientManager;
 use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
-use crate::server::{run, start_server, DefaultServer};
+use crate::server::{start_server, DefaultServer};
 use crate::state::InternalState;
 use crate::ui::start_ui;
 use log::info;
@@ -51,7 +52,7 @@ async fn main() -> Result<(), NetError> {
         let default_server = Arc::clone(&DefaultServer);
         let device_manager_arc_for_join = device_manager_arc.clone();
 
-        let _background_services = tokio::try_join!(
+        let _background_services = tokio::join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
                 local_ip
@@ -92,7 +93,8 @@ async fn main() -> Result<(), NetError> {
         });
 
         let challenge_manager = DefaultChallengeManager.clone();
-        let tasks = tokio::try_join!(
+        let client_manager = DefaultClientManager.clone();
+        let tasks = tokio::join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
                 local_ip
@@ -100,6 +102,7 @@ async fn main() -> Result<(), NetError> {
             tokio::spawn(broadcast::start_listener()),
             tokio::spawn(async move { server::run(default_server.clone()).await }),
             tokio::spawn(async move { challenge::run(challenge_manager.clone()).await }),
+            tokio::spawn(async move { client::run(client_manager.clone()).await }),
             tokio::spawn(async move { device_manager_arc_for_join.start().await }),
             tokio::spawn(cleanup()),
             known_devices_printer_handle
