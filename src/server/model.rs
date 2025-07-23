@@ -91,7 +91,7 @@ impl ResolvesServerCert for StaticCertResolver {
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         let certified_key = rustls::sign::CertifiedKey {
             cert: self.certs.clone(),
-            key: crypto::aws_lc_rs::sign::any_ecdsa_type(&self.key).expect("Cannot extract key"),
+            key: crypto::aws_lc_rs::sign::any_supported_type(&self.key).expect("Cannot extract key"),
             ocsp: None,
         };
         Some(Arc::new(certified_key))
