@@ -2,7 +2,7 @@ use crate::broadcast::DiscoveredDevice;
 use crate::consts::CHALLENGE_DEATH;
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
-use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, TcpPeer, TcpServer};
+use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, ServerTcpPeer, TcpServer};
 use crate::server::DefaultServer;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};

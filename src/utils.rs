@@ -86,7 +86,7 @@ pub(crate) fn load_cas<T: AsRef<Path>>(path: T) -> io::Result<RootCertStore> {
 /**
 Generates client storage on SERVER side for storing signed client PEM
 */
-pub fn get_client_cert_storage_server() -> PathBuf {
+pub fn get_client_cert_storage() -> PathBuf {
     let dir = get_default_application_dir();
     fs::create_dir_all(&dir.join(DEFAULT_CLIENT_CERT_STORAGE)).unwrap();
 

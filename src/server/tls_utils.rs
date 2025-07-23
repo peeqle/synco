@@ -1,7 +1,7 @@
 use crate::keychain::{load_cert_arc, load_private_key_arc};
-use crate::utils::get_client_cert_storage_server;
+use crate::utils::{get_client_cert_storage};
 use rcgen::{
-    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose, date_time_ymd,
+    date_time_ymd, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose,
 };
 use std::error::Error;
 use std::fs;
@@ -37,7 +37,7 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + 
 
     let client_cert_pem = client_cert.pem();
 
-    let dir = get_client_cert_storage_server();
+    let dir = get_client_cert_storage();
 
     let dn_value = client_params
         .distinguished_name
@@ -67,7 +67,7 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + 
 
 mod crt_test {
     use crate::server::tls_utils::sign_client_csr;
-    use crate::utils::get_client_cert_storage_server;
+    use crate::utils::get_client_cert_storage;
     use rcgen::{CertificateParams, DnType, DnValue, KeyPair};
     use std::fs;
     use uuid::Uuid;
@@ -88,7 +88,7 @@ mod crt_test {
     }
 
     fn clear_client_cert_dir() {
-        let dir = get_client_cert_storage_server();
+        let dir = get_client_cert_storage();
         fs::remove_dir_all(dir).expect("Cannot clear client cert DIR");
     }
 

@@ -1,6 +1,6 @@
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
-use crate::consts::DeviceId;
+use crate::consts::{DeviceId, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
 use crate::keychain::device_id;
 use crate::NetError;
@@ -74,9 +74,6 @@ impl DiscoveredDevice {
         self.last_seen = Instant::now();
     }
 }
-
-const DISCOVERY_PORT: u16 = 21028;
-const BROADCAST_INTERVAL_SECONDS: u64 = 10;
 
 // Device A (Client) sends a DiscoveryMessage (without passphrase).
 // Device B (Server) receives it and sends back a ChallengeMessage containing a random nonce (a "number used once").
@@ -162,7 +159,7 @@ pub async fn start_broadcast_announcer(
         DeviceId.to_string(),
         listening_port,
         Some(local_ip),
-        22000,
+        DEFAULT_SERVER_PORT,
         Some(local_ip),
         true,
     );

@@ -14,8 +14,10 @@ use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 impl TcpServer {
@@ -101,14 +103,15 @@ pub struct TcpServer {
     pub loaded_configuration: ServerConfig,
     pub current_acceptor: Arc<TlsAcceptor>,
     //socket_addr to device_id
-    pub connected_devices: Arc<Mutex<HashMap<String, TcpPeer>>>,
+    pub connected_devices: Arc<Mutex<HashMap<String, ServerTcpPeer>>>,
     pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
 }
 
-pub struct TcpPeer {
+pub struct ServerTcpPeer {
     pub device_id: String,
-    pub connection: Mutex<ServerConnection>,
+    pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
+    pub sender: Sender<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
