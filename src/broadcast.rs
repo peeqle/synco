@@ -101,8 +101,8 @@ pub async fn start_listener() -> Result<(), NetError> {
             Ok(msg) => {
                 let remote_addr = msg
                     .internal_ip
-                    .map_or(SocketAddr::new(peer_addr.ip(), msg.listening_port), |ip| {
-                        SocketAddr::new(ip, msg.listening_port)
+                    .map_or(SocketAddr::new(peer_addr.ip(), msg.tcp_listening_port), |ip| {
+                        SocketAddr::new(ip, msg.tcp_listening_port)
                     });
 
                 if msg.device_id != current_device_id {

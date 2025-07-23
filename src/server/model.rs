@@ -138,7 +138,7 @@ pub enum ServerActivity {
     VerifiedChallenge { device_id: String },
 }
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default,Debug)]
 pub enum ConnectionState {
     #[default]
     Unknown,
