@@ -1,5 +1,5 @@
 use crate::keychain::{load_cert_arc, load_private_key_arc};
-use crate::utils::{get_client_cert_storage};
+use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
 use rcgen::{
     date_time_ymd, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose,
 };
@@ -65,8 +65,19 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + 
     Ok(client_cert_path)
 }
 
+pub fn clear_client_cert_dir() {
+    let dir = get_client_cert_storage();
+    fs::remove_dir_all(dir).expect("Cannot clear client cert DIR");
+    
+    fs::remove_dir_all(get_server_cert_storage())
+        .expect("Cannot clear server cert DIR");
+    
+    fs::remove_dir_all(get_default_application_dir())
+        .expect("Cannot clear application DIR");
+}
+
 mod crt_test {
-    use crate::server::tls_utils::sign_client_csr;
+    use crate::server::tls_utils::{clear_client_cert_dir, sign_client_csr};
     use crate::utils::get_client_cert_storage;
     use rcgen::{CertificateParams, DnType, DnValue, KeyPair};
     use std::fs;
@@ -85,11 +96,6 @@ mod crt_test {
         }
 
         assert!(server_signed_csr.unwrap().exists());
-    }
-
-    fn clear_client_cert_dir() {
-        let dir = get_client_cert_storage();
-        fs::remove_dir_all(dir).expect("Cannot clear client cert DIR");
     }
 
     //replace with actual csr generation method

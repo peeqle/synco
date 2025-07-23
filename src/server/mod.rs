@@ -40,7 +40,7 @@ use tokio::task;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
-mod tls_utils;
+pub(crate) mod tls_utils;
 pub(crate) mod model;
 
 lazy_static! {
