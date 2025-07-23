@@ -80,57 +80,7 @@ pub fn generate_server_ca_keys() -> Result<(PathBuf, PathBuf), Box<dyn Error + S
     println!("Root CA generated and saved at: {}", ca_cert_path.display());
     println!("Main CA generated and saved at: {}", ca_key_path.display());
 
-    // Generate server certificate signed by CA
-    generate_server_cert_signed_by_ca(&ca_cert, &ca_keypair)?;
-
     Ok((ca_cert_path, ca_key_path))
-}
-
-pub fn generate_server_cert_signed_by_ca(
-    ca_cert: &Certificate,
-    ca_keypair: &KeyPair,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    println!("Generating server certificate signed by CA...");
-
-    let mut server_params =
-        CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
-    let mut cert_name = DistinguishedName::new();
-
-    cert_name.push(DnType::OrganizationName, DeviceId.to_string());
-    cert_name.push(
-        DnType::CommonName,
-        DnValue::PrintableString("synco".try_into().unwrap()),
-    );
-    server_params.distinguished_name = cert_name;
-    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    server_params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
-    server_params.is_ca = IsCa::NoCa;
-
-    server_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
-    server_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
-
-    let server_keypair = generate_keypair()?;
-
-    // Sign server certificate with CA
-    let server_cert = server_params.signed_by(&server_keypair, ca_cert, ca_keypair)?;
-    let server_private_key_pem = server_keypair.serialize_pem();
-    let server_cert_pem = server_cert.pem();
-
-    let app_data_dir = get_default_application_dir();
-
-    let key_file_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
-    let cert_file_path = app_data_dir.join(CERT_FILE_NAME);
-
-    fs::write(&key_file_path, server_private_key_pem.as_bytes())?;
-    fs::write(&cert_file_path, server_cert_pem.as_bytes())?;
-
-    println!("Server certificate signed by CA and saved at: {}", cert_file_path.display());
-    println!("Server private key saved at: {}", key_file_path.display());
-
-    Ok(())
 }
 
 fn load_signing_key_or_create() -> Result<SigningKey, Box<dyn Error + Send + Sync>> {
@@ -179,9 +129,36 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
 }
 
 pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
-    // This function is now deprecated - server certificates are generated
-    // by generate_server_cert_signed_by_ca() which is called from generate_server_ca_keys()
-    println!("Server certificates are now generated automatically by CA setup");
+    let mut params =
+        CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
+    let mut cert_name = DistinguishedName::new();
+
+    cert_name.push(DnType::OrganizationName, DeviceId.to_string());
+    cert_name.push(
+        DnType::CommonName,
+        DnValue::PrintableString("synco".try_into().unwrap()),
+    );
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.is_ca = IsCa::NoCa;
+
+    let keypair = generate_keypair()?;
+
+    let cert = params.self_signed(&keypair)?;
+    let private_key_pem = keypair.serialize_pem();
+    let cert_pem = cert.pem();
+
+    let app_data_dir = get_default_application_dir();
+
+    let key_file_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
+    let cert_file_path = app_data_dir.join(CERT_FILE_NAME);
+
+    fs::write(&key_file_path, private_key_pem.as_bytes())?;
+    fs::write(&cert_file_path, cert_pem.as_bytes())?;
+
     Ok(())
 }
 
@@ -236,11 +213,8 @@ fn load_server_cert(called_within: bool) -> io::Result<Certificate> {
                 if called_within {
                     return Err(err);
                 }
-                println!("Server certificate not found. Generating CA and server certificates...");
-                // Generate CA which will also generate the server certificate
-                generate_server_ca_keys().map_err(|e| {
-                    io::Error::new(ErrorKind::Other, format!("Failed to generate certificates: {}", e))
-                })?;
+                println!("Creating certificates...");
+                generate_cert_keys().unwrap();
                 load_server_cert(true)
             }
             ErrorKind::PermissionDenied => {
@@ -270,11 +244,8 @@ fn load_server_private_key(called_within: bool) -> io::Result<KeyPair> {
                 if called_within {
                     return Err(err);
                 }
-                println!("Server private key not found. Generating CA and server certificates...");
-                // Generate CA which will also generate the server certificate and key
-                generate_server_ca_keys().map_err(|e| {
-                    io::Error::new(ErrorKind::Other, format!("Failed to generate certificates: {}", e))
-                })?;
+                println!("Creating certificates...");
+                generate_cert_keys().unwrap();
                 load_server_private_key(true)
             }
             ErrorKind::PermissionDenied => {
@@ -343,6 +314,13 @@ pub fn device_id() -> Option<String> {
     let device_id_raw = &hash_result.as_bytes()[..20];
 
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
+}
+
+pub fn get_server_ca_crt_path() -> PathBuf {
+    get_server_cert_storage().join(CA_CERT_FILE_NAME)
+}
+pub fn get_server_key_crt_path() -> PathBuf {
+    get_server_cert_storage().join(CA_KEY_FILE_NAME)
 }
 
 mod keychain_test {
