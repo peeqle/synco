@@ -28,12 +28,20 @@ pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + 
     client_params.not_before = date_time_ymd(1975, 1, 1);
     client_params.not_after = date_time_ymd(4096, 1, 1);
 
-    let loaded_crt = load_cert_arc()?;
-    let loaded_pk = load_private_key_arc()?;
+    use crate::keychain::load_pk;
+    use crate::utils::get_server_cert_storage;
+    use crate::consts::{CA_CERT_FILE_NAME, CA_KEY_FILE_NAME};
+    
+    let server_cert_dir = get_server_cert_storage();
+    let ca_cert_path = server_cert_dir.join(CA_CERT_FILE_NAME);
+    let ca_key_path = server_cert_dir.join(CA_KEY_FILE_NAME);
+    
+    let ca_cert = crate::keychain::load_crt(&ca_cert_path)?;
+    let ca_key = load_pk(&ca_key_path)?;
 
     let client_cert = client_params
         .clone()
-        .signed_by(&*loaded_pk, &loaded_crt, &loaded_pk)?;
+        .signed_by(&ca_key, &ca_cert, &ca_key)?;
 
     let client_cert_pem = client_cert.pem();
 
