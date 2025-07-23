@@ -1,4 +1,5 @@
 use crate::broadcast::DiscoveredDevice;
+use crate::consts::DeviceId;
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::HashMap;
@@ -7,8 +8,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Condvar};
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock, mpsc, Notify};
-use tokio::time::{Instant, sleep};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio::time::{sleep, Instant};
 
 lazy_static! {
     pub static ref DefaultDeviceManager: Arc<DeviceManager> = {
@@ -60,15 +61,24 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let receiver_mutex = &device_manager_arc.bounded_channel.1;
     let known_devices = &device_manager_arc.known_devices;
-    loop {
-        let mut r = receiver_mutex.lock().await;
-        tokio::select! {
-                 Some(message) = r.recv() => {
-            match message {
-                DeviceManagerQuery::DiscoveredDevice { device_id, socket_addr } => {
-                    let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
-    
-                    let mut devices = known_devices.write().await;
+
+    let handle = async |message: DeviceManagerQuery| {
+        match message {
+            DeviceManagerQuery::DiscoveredDevice { device_id, socket_addr } => {
+                let new_device = DiscoveredDevice::new(device_id.clone(), socket_addr);
+
+                let mut devices = known_devices.write().await;
+                let mut conflicting_id: Option<String> = None;
+                for (id, device) in devices.iter() {
+                    if id != &device_id && device.connect_addr.eq(&new_device.connect_addr) {
+                        conflicting_id = Some(id.clone());
+                        break;
+                    }
+                }
+                if let Some(conflict) = conflicting_id {
+                    devices.remove(&conflict);
+                    devices.insert(device_id, new_device);
+                } else {
                     match devices.entry(device_id) {
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             entry.get_mut().update_last_seen();
@@ -79,19 +89,20 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                             println!("Device Manager: Discovered new device: {:?}", new_device);
                             entry.insert(new_device.clone());
                             // self.device_updates_tx.send(DeviceUpdate::Added(new_device)).await.ok();
-    
+
                         }
                     }
                 }
-                    
             }
-                device_manager_arc.notify.notify_waiters();
         }
-            else => break
+        device_manager_arc.notify.notify_waiters();
+    };
+    loop {
+        let mut r = receiver_mutex.lock().await;
+        tokio::select! {
+            Some(message) = r.recv() => handle(message).await
         }
     }
-
-    Ok(())
 }
 
 pub async fn cleanup() {

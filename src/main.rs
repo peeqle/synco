@@ -8,10 +8,12 @@ use crate::state::InternalState;
 use crate::ui::start_ui;
 use log::info;
 use std::error::Error;
+use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use crate::server::tls_utils::clear_client_cert_dir;
 
 mod balancer;
 mod broadcast;
@@ -35,14 +37,13 @@ async fn main() -> Result<(), NetError> {
 
     let args: Vec<String> = std::env::args().collect();
     let use_ui = args.contains(&"--ui".to_string()) || args.contains(&"-u".to_string());
+    let fresh = args.contains(&"--fresh".to_string()) || args.contains(&"-f".to_string());
+    
+    if fresh {
+        clear_client_cert_dir();
+    }
 
-    let internal_state = InternalState::new().with_passphrase("bonkers".to_string());
-
-    let local_ip = get_local_ip().expect("Could not determine local IP address");
-
-    info!("My Device ID: {}", &DeviceId[..]);
-    info!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
-    info!("My Local IP: {}", local_ip);
+    let addr = initialize();
 
     if use_ui {
         info!("Starting with UI mode...");
@@ -55,7 +56,7 @@ async fn main() -> Result<(), NetError> {
         let _background_services = tokio::join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
-                local_ip
+                addr
             )),
             tokio::spawn(broadcast::start_listener()),
             tokio::spawn(async move { start_server(default_server).await }),
@@ -97,7 +98,7 @@ async fn main() -> Result<(), NetError> {
         let tasks = tokio::join!(
             tokio::spawn(broadcast::start_broadcast_announcer(
                 DEFAULT_LISTENING_PORT,
-                local_ip
+                addr
             )),
             tokio::spawn(broadcast::start_listener()),
             tokio::spawn(async move { server::run(default_server.clone()).await }),
@@ -110,4 +111,16 @@ async fn main() -> Result<(), NetError> {
     }
 
     Ok(())
+}
+
+fn initialize() -> IpAddr {
+    let internal_state = InternalState::new().with_passphrase("bonkers".to_string());
+
+    let local_ip = get_local_ip().expect("Could not determine local IP address");
+
+    info!("My Device ID: {}", &DeviceId[..]);
+    info!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
+    info!("My Local IP: {}", local_ip);
+    
+    local_ip
 }
