@@ -1,44 +1,24 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::DeviceChallengeStatus::Active;
 use crate::challenge::{
-    generate_challenge, ChallengeEvent, DefaultChallengeManager, DeviceChallengeStatus,
+    generate_challenge, ChallengeEvent, DefaultChallengeManager,
 };
-use crate::consts::{CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT};
+use crate::consts::DEFAULT_SERVER_PORT;
 use crate::device_manager::{get_device, DefaultDeviceManager};
-use crate::keychain::{device_id, generate_server_ca_keys, load_cert_der, load_private_key_der};
-use crate::machine_utils::get_local_ip;
-use crate::server::model::ConnectionRequestQuery::RejectConnection;
-use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
-use crate::server::model::{ConnectionRequestQuery, ConnectionState, ServerActivity, StaticCertResolver, ServerTcpPeer, TcpServer};
-use crate::utils::{
-    decrypt_with_passphrase, get_server_cert_storage, load_cas, validate_server_cert_present,
-};
+use crate::server::model::ConnectionState::{Access, Denied, Unknown};
+use crate::server::model::{ConnectionRequestQuery, ServerActivity, ServerTcpPeer, TcpServer};
 use crate::NetError;
-use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use log::{error, info};
-use rustls::server::danger::ClientCertVerifier;
-use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig, ServerConnection};
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use rustls::ServerConnection;
 use std::error::Error;
-use std::fmt::{Debug, Formatter};
-use std::hash::Hash;
 use std::io;
-use std::io::{ErrorKind, Read, Write};
-use std::net::{IpAddr, SocketAddr};
-use std::ops::Deref;
+use std::io::{ErrorKind, Write};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
-use tokio_rustls::server::TlsStream;
-use tokio_rustls::TlsAcceptor;
 
 pub(crate) mod tls_utils;
 pub(crate) mod model;

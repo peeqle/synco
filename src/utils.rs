@@ -1,19 +1,17 @@
-use crate::broadcast::DiscoveredDevice;
-use crate::challenge::DeviceChallengeStatus::Active;
-use crate::challenge::{DefaultChallengeManager, DeviceChallengeStatus};
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
-use log::{debug, info};
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::{fs, io};
+use std::sync::Arc;
+use base32::Alphabet;
+use crate::keychain::DEVICE_SIGNING_KEY;
 
 pub mod control {
     use std::error::Error;
@@ -21,6 +19,20 @@ pub mod control {
     pub trait ConnectionStatusVerification {
         fn verify_self(&self) -> Result<bool, Box<dyn Error>>;
     }
+}
+
+pub fn device_id() -> Option<String> {
+    let cp = Arc::clone(&DEVICE_SIGNING_KEY);
+
+    let public_key_bytes = cp.verifying_key().to_bytes();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&public_key_bytes);
+    let hash_result = hasher.finalize();
+
+    let device_id_raw = &hash_result.as_bytes()[..20];
+
+    Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
 pub fn get_default_application_dir() -> PathBuf {
@@ -179,7 +191,7 @@ mod test {
             &enc_response.2,
             passphrase.as_bytes(),
         )
-        .expect("Cannot decrypt");
+            .expect("Cannot decrypt");
 
         println!("Decrypted data: {:?}", decr_response);
         assert_eq!(decr_response.as_slice(), data_to_encrypt);

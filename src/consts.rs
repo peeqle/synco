@@ -1,7 +1,7 @@
-use crate::keychain::device_id;
 use der::asn1::ObjectIdentifier;
 use lazy_static::lazy_static;
 use std::error::Error;
+use crate::utils::device_id;
 
 lazy_static! {
     pub static ref DeviceId: String = device_id()

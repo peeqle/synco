@@ -3,11 +3,9 @@
 
 mod util;
 
-use crate::consts::{BUFFER_SIZE, DAError};
+use crate::consts::{DAError, BUFFER_SIZE};
 use crate::diff::util::is_file_binary_utf8;
-use crate::keychain::device_id;
-use crate::utils::verify_permissions;
-use FileManagerOperations::*;
+use crate::utils::{device_id, verify_permissions};
 use blake3::{Hash, Hasher};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -17,9 +15,10 @@ use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
 use tokio::time::Instant;
+use FileManagerOperations::*;
 
 lazy_static! {
     pub static ref ProcessedFiles: Arc<Mutex<HashMap<String, FileEntity>>> =

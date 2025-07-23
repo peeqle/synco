@@ -1,5 +1,5 @@
 use crate::consts::CA_CERT_FILE_NAME;
-use crate::keychain::{generate_server_ca_keys, load_cert_der, load_private_key_der};
+use crate::keychain::{generate_cert_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
@@ -26,7 +26,7 @@ impl TcpServer {
     ) -> Result<TcpServer, Box<dyn Error + Send + Sync>> {
         let validation = validate_server_cert_present();
         if !validation {
-            let res = generate_server_ca_keys();
+            let res = generate_cert_keys();
             if res.is_err() {
                 return Err(Box::new(io::Error::new(
                     ErrorKind::InvalidData,
