@@ -4,7 +4,7 @@ use crate::machine_utils::get_local_ip;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig, ServerConnection};
+use rustls::{crypto, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -111,11 +111,11 @@ pub struct ServerTcpPeer {
     pub device_id: String,
     pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
-    pub sender: Sender<String>,
+    pub sender: Sender<ServerResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ConnectionRequestQuery {
+pub enum ServerRequest {
     InitialRequest {
         device_id: String,
     },
@@ -130,6 +130,20 @@ pub enum ConnectionRequestQuery {
     },
     AcceptConnection(String),
     RejectConnection(String),
+    SignCsr {
+        csr_pem: String
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ServerResponse {
+    SignedCertificate {
+        cert_pem: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +152,7 @@ pub enum ServerActivity {
     VerifiedChallenge { device_id: String },
 }
 
-#[derive(Clone, PartialEq, Default,Debug)]
+#[derive(Clone, PartialEq, Default, Debug)]
 pub enum ConnectionState {
     #[default]
     Unknown,

@@ -129,18 +129,90 @@ pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
     }
 }
 
+pub mod node {
+    use crate::utils::{device_id, get_default_application_dir};
+    use rcgen::{CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
+    use std::error::Error;
+    use std::fs;
+    use std::path::PathBuf;
+
+    pub fn generate_certs(
+        ca_cert_pem: &str,
+        ca_key_pem: &str,
+        node_ip_address: &str,
+    ) -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
+        let node_name = device_id().unwrap();
+        println!("Node CRT generation '{}'...", node_name);
+
+        let ca_key_pair = KeyPair::from_pem(&ca_key_pem)?;
+        
+        let ca_cert_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)?;
+        let ca_cert = ca_cert_params.self_signed(&ca_key_pair)?;
+
+
+        let server_storage: PathBuf = get_default_application_dir();
+        fs::create_dir_all(&server_storage)?;
+
+        let server_keypair = KeyPair::generate()?;
+
+        let mut server_params = CertificateParams::new(vec![])?;
+        server_params.distinguished_name = rcgen::DistinguishedName::new();
+        server_params
+            .distinguished_name
+            .push(DnType::CommonName, format!("{}-server", node_name));
+        server_params
+            .distinguished_name
+            .push(DnType::OrganizationName, "synco P2P Network".to_string());
+
+        server_params.subject_alt_names = vec![SanType::IpAddress(node_ip_address.parse()?)];
+
+        server_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        server_params.is_ca = IsCa::NoCa;
+        server_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        server_params.not_after = rcgen::date_time_ymd(2027, 1, 1);
+
+        let server_cert = server_params.signed_by(&server_keypair, &ca_cert, &ca_key_pair)?;
+
+        let server_cert_pem = server_cert.pem();
+        let server_private_key_pem = server_keypair.serialize_pem();
+
+        let server_cert_path = server_storage.join(format!("{}_server_cert.pem", node_name));
+        let server_key_path = server_storage.join(format!("{}_server_key.pem", node_name));
+
+        fs::write(&server_cert_path, server_cert_pem.as_bytes())?;
+        fs::write(&server_key_path, server_private_key_pem.as_bytes())?;
+
+        Ok((server_cert_path, server_key_path))
+    }
+}
+
 pub mod server {
     use crate::consts::{CA_CERT_FILE_NAME, CA_KEY_FILE_NAME};
     use crate::keychain::{load_cert, load_private_key};
     use crate::utils::{get_client_cert_storage, get_server_cert_storage};
+    use log::info;
     use rcgen::{date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
     use std::error::Error;
     use std::fs;
     use std::fs::File;
     use std::path::PathBuf;
 
-    pub fn generate_ca_keys() -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
-        println!("Generating new CA certificate for server operations...");
+    pub fn generate_signing_ca() -> Result<(PathBuf, PathBuf), Box<dyn Error + Send + Sync>> {
+        let (ca_path, kp_path) = {
+            let server_storage: PathBuf = get_server_cert_storage();
+            fs::create_dir_all(&server_storage)?;
+
+            (server_storage.join(CA_CERT_FILE_NAME), server_storage.join(CA_KEY_FILE_NAME))
+        };
+        if fs::exists(&ca_path)? && fs::exists(&kp_path)? {
+            return Ok((ca_path, kp_path));
+        }
+
+        info!("Generating new CA certificate for server operations...");
 
         let mut ca_params = CertificateParams::new(vec![])?;
         ca_params.distinguished_name = DistinguishedName::new();
@@ -157,9 +229,9 @@ pub mod server {
 
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
 
-        ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);;
         ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
 
         let ca_keypair = KeyPair::generate()?;
@@ -168,19 +240,13 @@ pub mod server {
         let ca_cert_pem = ca_cert.pem();
         let ca_private_key_pem = ca_keypair.serialize_pem();
 
-        let server_storage: PathBuf = get_server_cert_storage();
-        fs::create_dir_all(&server_storage)?;
+        fs::write(&ca_path, ca_cert_pem.as_bytes())?;
+        fs::write(&kp_path, ca_private_key_pem.as_bytes())?;
 
-        let ca_cert_path = server_storage.join(CA_CERT_FILE_NAME);
-        let ca_key_path = server_storage.join(CA_KEY_FILE_NAME);
+        info!("CA generated and saved at: {}", ca_path.display());
+        info!("Keys are generated and saved at: {}", kp_path.display());
 
-        fs::write(&ca_cert_path, ca_cert_pem.as_bytes())?;
-        fs::write(&ca_key_path, ca_private_key_pem.as_bytes())?;
-
-        println!("Root CA generated and saved at: {}", ca_cert_path.display());
-        println!("Main CA generated and saved at: {}", ca_key_path.display());
-
-        Ok((ca_cert_path, ca_key_path))
+        Ok((ca_path, kp_path))
     }
 
     pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
@@ -206,18 +272,18 @@ pub mod server {
         let loaded_crt = load_cert(false)?;
         let loaded_pk = load_private_key(false)?;
 
+        let dn_value = client_params
+            .distinguished_name
+            .get(&DnType::CommonName)
+            .unwrap().clone();
+
         let client_cert = client_params
-            .clone()
-            .signed_by(&loaded_pk, &loaded_crt, &loaded_pk)?;
+            .signed_by(&csr.public_key, &loaded_crt, &loaded_pk)?;
 
         let client_cert_pem = client_cert.pem();
 
         let dir = get_client_cert_storage();
-
-        let dn_value = client_params
-            .distinguished_name
-            .get(&DnType::CommonName)
-            .unwrap();
+        fs::create_dir_all(&dir)?;
 
         let common_name = match dn_value {
             rcgen::DnValue::PrintableString(s) => s.to_string(),
@@ -228,7 +294,6 @@ pub mod server {
         let client_cert_file_name = format!("{}_cert.pem", common_name);
 
         let client_cert_path = dir.join(&client_cert_file_name);
-        File::create_new(&client_cert_path).expect("File creation exception");
 
         fs::write(&client_cert_path, client_cert_pem.as_bytes())?;
 
@@ -252,7 +317,7 @@ fn load_signing_key_or_create() -> Result<SigningKey, Box<dyn Error + Send + Syn
     let mut app_data_dir = get_default_application_dir();
 
     let key_file_path = app_data_dir.join(SIGNING_KEY);
-    match fs::read(key_file_path) {
+    match fs::read(&key_file_path) {
         Ok(private_key_bytes) => {
             let secret_key_array: [u8; 32] =
                 private_key_bytes.as_slice().try_into().map_err(|_| {

@@ -5,16 +5,16 @@ use crate::challenge::{
 use crate::consts::DEFAULT_SERVER_PORT;
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
-use crate::server::model::{ConnectionRequestQuery, ServerActivity, ServerTcpPeer, TcpServer};
+use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, TcpServer};
 use crate::NetError;
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::ServerConnection;
 use std::error::Error;
-use std::io;
 use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{fs, io};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, Mutex};
@@ -77,7 +77,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                         let connecting_device = connecting_device_option.unwrap();
                         let mut connected_devices_arc = server_arc.connected_devices.lock().await;
 
-                        let (server_sender, server_receiver) = mpsc::channel::<String>(100);
+                        let (server_sender, server_receiver) = mpsc::channel::<ServerResponse>(100);
 
                         let device_connection = connected_devices_arc.entry(connecting_device.device_id.clone())
                             .or_insert_with(|| ServerTcpPeer {
@@ -112,37 +112,66 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
 async fn handle_client_actions(
     server: Arc<TcpServer>,
     device_id: String,
-    mut server_receiver: Receiver<String>,
+    mut server_receiver: Receiver<ServerResponse>,
 ) {
     info!("Started client handler for device: {}", device_id);
 
     while let Some(message) = server_receiver.recv().await {
-        info!("Received message from {}: {}", device_id, message);
-
-        match serde_json::from_str::<ConnectionRequestQuery>(&message) {
-            Ok(query) => {
-                match query {
-                    ConnectionRequestQuery::InitialRequest { .. } => {}
-                    ConnectionRequestQuery::ChallengeRequest { .. } => {}
-                    ConnectionRequestQuery::ChallengeResponse { .. } => {
-                        if let Err(e) = DefaultChallengeManager
-                            .get_sender()
-                            .send(ChallengeEvent::ChallengeVerification {
-                                connection_response: query,
-                            })
-                            .await
-                        {
-                            error!("Failed to send challenge verification: {}", e);
-                        }
-                    }
-                    ConnectionRequestQuery::AcceptConnection(_) => {}
-                    ConnectionRequestQuery::RejectConnection(_) => {
-                        break;
-                    }
+        info!("Received message from {}: {:?}", device_id, message);
+        match message {
+            ServerRequest::InitialRequest { .. } => {}
+            ServerRequest::ChallengeRequest { .. } => {}
+            ServerRequest::ChallengeResponse { .. } => {
+                if let Err(e) = DefaultChallengeManager
+                    .get_sender()
+                    .send(ChallengeEvent::ChallengeVerification {
+                        connection_response: query,
+                    })
+                    .await
+                {
+                    error!("Failed to send challenge verification: {}", e);
                 }
             }
-            Err(err) => {
-                error!("Error processing message from {}: {}", device_id, err);
+            ServerRequest::AcceptConnection(_) => {}
+            ServerRequest::RejectConnection(_) => {
+                break;
+            }
+            ServerRequest::SignCsr { csr_pem } => {
+                info!("Received CSR from device {}. Attempting to sign...", device_id);
+                let response_sender = {
+                    let connected_devices_guard = server.connected_devices.lock().await;
+                    connected_devices_guard.get(&device_id)
+                        .map(|peer| peer.response_sender.clone())
+                };
+
+                if let Some(sender) = response_sender {
+                    match keychain::server::sign_client_csr(&csr_pem).await {
+                        Ok(signed_cert_path) => {
+                            match fs::read_to_string(&signed_cert_path) {
+                                Ok(signed_cert_pem) => {
+                                    info!("CSR from device {} signed successfully.", device_id);
+                                    if let Err(e) = sender.send(ServerResponse::SignedCertificate { cert_pem: signed_cert_pem }).await {
+                                        error!("Failed to send signed certificate to {}: {}", device_id, e);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to read signed certificate from path {}: {}", signed_cert_path.display(), e);
+                                    if let Err(e) = sender.send(ServerResponse::Error { message: format!("Failed to read signed certificate: {}", e) }).await {
+                                        error!("Failed to send error response to {}: {}", device_id, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to sign CSR for device {}: {}", device_id, e);
+                            if let Err(e) = sender.send(ServerResponse::Error { message: format!("Failed to sign CSR: {}", e) }).await {
+                                error!("Failed to send error response to {}: {}", device_id, e);
+                            }
+                        }
+                    }
+                } else {
+                    error!("Could not find response sender for device {}", device_id);
+                }
             }
         }
     }
@@ -207,6 +236,22 @@ async fn handle_receiver_message(
         }
     }
     Ok(())
+}
+
+async fn send_response_to_client(
+    connection: &mut ServerConnection,
+    response: ServerResponse,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let serialized = serde_json::to_vec(&response)?;
+    if let Err(e) = connection.writer().write_all(&serialized) {
+        Err(Box::new(io::Error::new(
+            ErrorKind::Interrupted,
+            format!("Failed to write response: {}", e),
+        )))
+    } else {
+        connection.writer().flush()?;
+        Ok(())
+    }
 }
 
 async fn send_challenge(
