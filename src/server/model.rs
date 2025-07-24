@@ -111,7 +111,8 @@ pub struct ServerTcpPeer {
     pub device_id: String,
     pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
-    pub sender: Sender<ServerResponse>,
+    pub writer_request: Sender<ServerRequest>,
+    pub writer_response: Sender<ServerResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,10 +136,11 @@ pub enum ServerRequest {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ServerResponse {
     SignedCertificate {
+        device_id: String,
         cert_pem: String,
     },
     Error {
