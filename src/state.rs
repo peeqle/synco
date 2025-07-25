@@ -1,5 +1,5 @@
-use crate::keychain::device_id;
 use serde::{Deserialize, Serialize};
+use crate::utils::device_id;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct InternalState {

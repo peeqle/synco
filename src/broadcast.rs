@@ -2,7 +2,6 @@ use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::{DeviceId, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
-use crate::keychain::device_id;
 use crate::NetError;
 use log::{error, info};
 use serde::{Deserialize, Serialize};

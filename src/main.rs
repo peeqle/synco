@@ -13,6 +13,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use crate::keychain::server::generate_signing_ca;
 use crate::server::tls_utils::clear_client_cert_dir;
 
 mod balancer;
@@ -118,9 +119,10 @@ fn initialize() -> IpAddr {
 
     let local_ip = get_local_ip().expect("Could not determine local IP address");
 
-    info!("My Device ID: {}", &DeviceId[..]);
-    info!("My Listening Port: {}", DEFAULT_LISTENING_PORT);
-    info!("My Local IP: {}", local_ip);
-    
+    info!("Device ID: {}", &DeviceId[..]);
+    info!("Listening Port: {}", DEFAULT_LISTENING_PORT);
+    info!("Local IP: {}", local_ip);
+
+    generate_signing_ca();
     local_ip
 }
