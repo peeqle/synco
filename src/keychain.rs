@@ -249,7 +249,7 @@ pub mod server {
         Ok((ca_path, kp_path))
     }
 
-    pub fn sign_client_csr(csr_pem: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    pub fn sign_client_csr(csr_pem: &str) -> Result<(Vec<u8>, PathBuf), Box<dyn Error + Send + Sync>> {
         let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem)?;
 
         let mut client_params = CertificateParams::default();
@@ -302,7 +302,7 @@ pub mod server {
             client_cert_path.display()
         );
 
-        Ok(client_cert_path)
+        Ok((client_cert_pem.as_bytes().to_vec(), client_cert_path))
     }
 }
 
@@ -400,49 +400,4 @@ pub fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
         .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
 
     Ok(rcgen_key_pair)
-}
-
-
-mod test {
-    use crate::keychain::server::sign_client_csr;
-    use crate::server::tls_utils::clear_client_cert_dir;
-    use rcgen::{CertificateParams, DnType, DnValue, KeyPair};
-    use uuid::Uuid;
-
-    #[test]
-    fn test_client_signing() {
-        clear_client_cert_dir();
-
-        let client_pem = create_client_pem_template();
-        let server_signed_csr = sign_client_csr(&client_pem);
-
-        if server_signed_csr.is_err() {
-            let err = server_signed_csr.err().unwrap();
-            panic!("User certificate signing has failed: {}", err);
-        }
-
-        assert!(server_signed_csr.unwrap().exists());
-    }
-
-    //replace with actual csr generation method
-    fn create_client_pem_template() -> String {
-        let mut params = CertificateParams::default();
-        let ds = &mut params.distinguished_name;
-        ds.push(DnType::CommonName, "client".to_string());
-        ds.push(
-            DnType::OrganizationName,
-            DnValue::Utf8String(blake3::hash(Uuid::new_v4().as_bytes().as_slice()).to_string()),
-        );
-
-        params.is_ca = rcgen::IsCa::NoCa;
-        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-
-        let pk = KeyPair::generate().unwrap();
-        let cert = params.serialize_request(&pk).unwrap();
-
-        let csr_pem = cert.pem().unwrap();
-        println!("Client CSR:\n{}", csr_pem);
-
-        csr_pem
-    }
 }

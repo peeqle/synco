@@ -3,7 +3,7 @@
 
 mod util;
 
-use crate::consts::{DAError, BUFFER_SIZE};
+use crate::consts::{CommonThreadError, BUFFER_SIZE};
 use crate::diff::util::is_file_binary_utf8;
 use crate::utils::{device_id, verify_permissions};
 use blake3::{Hash, Hasher};
@@ -42,7 +42,7 @@ pub struct FileManager {
     rx: FileReceiverRx,
 }
 
-enum FileManagerOperations {
+pub enum FileManagerOperations {
     InsertRequired {
         file_entity: FileEntity,
     },
@@ -161,7 +161,7 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
 /// 4. Request content from the *synchronizing* point for the [flag_top, flag_bottom]
 /// 5. Load changes, update hashes on both sides
 
-pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), DAError> {
+pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), CommonThreadError> {
     //create file synchronization stats - here - ???
     //assuming that file is loaded on instant (test only)
     //file hash deviation considered to load instantly
