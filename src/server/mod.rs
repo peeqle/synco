@@ -19,7 +19,7 @@ use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{fs, io};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
@@ -296,19 +296,22 @@ async fn get_serialized_challenge(
 }
 
 async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<(), CommonThreadError> {
-    let ca_cert = fs::read_to_string(
-        get_server_cert_storage().join(CA_CERT_FILE_NAME)
-    ).unwrap_or_default();
+    let mut buffer = vec![0; 4096];
+    let bytes_read = stream.read(&mut buffer).await
+        .map_err(|e| of_type("Failed to read client request", ErrorKind::Other))?;
 
-    match serde_json::from_str::<SigningServerRequest>(&ca_cert) {
+
+    match serde_json::from_slice::<SigningServerRequest>(&buffer[..bytes_read]) {
         Ok(request) => {
             match request {
                 SigningServerRequest::FetchCsr => {
                     if let Some(device) = get_device_by_socket(&socket).await {
                         info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
-                        // let loaded_crt = load_cert(false)?;
-
-                        stream.write_all("Xx".as_bytes()).await?;
+                        let ca_cert = fs::read_to_string(
+                            get_server_cert_storage().join(CA_CERT_FILE_NAME)
+                        ).unwrap_or_default();
+                        
+                        stream.write_all(ca_cert.as_bytes()).await?;
                     }
                 }
             }
