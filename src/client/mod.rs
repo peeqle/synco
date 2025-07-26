@@ -1,15 +1,15 @@
-use crate::consts::CA_CERT_FILE_NAME;
+use crate::consts::{CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
-use crate::server::model::{ConnectionState, ServerTcpPeer, TcpServer};
+use crate::server::model::{ConnectionState, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
 use crate::utils::{get_server_cert_storage, load_cas};
 use lazy_static::lazy_static;
 use log::info;
 use rustls::client::WebPkiServerVerifier;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::{IpAddr, Ipv4Addr, ServerName};
+use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
@@ -17,11 +17,15 @@ use std::fs::File;
 use std::hash::Hash;
 use std::io;
 use std::io::{BufReader, ErrorKind};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{TlsConnector, TlsStream};
+
 
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
@@ -31,6 +35,8 @@ lazy_static! {
             bounded_channel: (sender, Mutex::new(receiver)) 
         })
     };
+    
+    pub static ref SigningRequests: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 
@@ -102,8 +108,19 @@ async fn listen(_manager: Arc<ClientManager>) {
     let handle_fn = async |x: ClientActivity| {
         match x {
             ClientActivity::OpenConnection { device_id } => {
-                open_connection(device_id.clone()).await
-                    .expect(&format!("Cannot open connection for: {}", device_id));
+                let empty = {
+                    let mtx = Arc::clone(&DefaultClientManager);
+                    !mtx.connections.lock().await.contains_key(&device_id)
+                };
+
+                if empty {
+                    let device_manager = Arc::clone(&DefaultDeviceManager);
+                    if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
+                        request_ca(&device.connect_addr).await.expect(&format!("Cannot fetch requested CA from: {}", &device_id));
+                        open_connection(device_id.clone()).await
+                            .expect(&format!("Cannot open connection for: {}", device_id));
+                    }
+                }
             }
         }
     };
@@ -126,7 +143,7 @@ async fn open_connection(server_id: String) -> Result<(), Box<dyn Error>> {
         let connector = TlsConnector::from(client.configuration.clone());
 
         if let Ok(e) = connector.connect(ServerName::IpAddress(
-            IpAddr::V4(Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?)), stream).await {
+            rustls_pki_types::IpAddr::V4(rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?)), stream).await {
             let (client_sender, mut client_receiver) = mpsc::channel(200);
             let mut mtx = client.connection.lock().await;
 
@@ -147,13 +164,33 @@ async fn open_connection(server_id: String) -> Result<(), Box<dyn Error>> {
                 });
             }
         }
-        
+
         info!("Client created: {:?}", &client);
         let _manager = Arc::clone(&DefaultClientManager);
         let mut mtx = _manager.connections.lock().await;
         mtx.insert(device.device_id.clone(), client);
         drop(mtx);
+
+        return Ok(());
     }
 
     Err(Box::new(io::Error::new(ErrorKind::BrokenPipe, format!("Cannot open new Tcp Client for {}", server_id))))
+}
+
+pub async fn request_ca(connection_addr: &SocketAddr) -> Result<Option<ServerResponse>, Box<dyn Error>> {
+    let mut stream = TcpStream::connect(SocketAddr::new(
+        IpAddr::try_from(Ipv4Addr::from_str(&connection_addr.ip().to_string())?)?, DEFAULT_SIGNING_SERVER_PORT)).await?;
+
+    stream.write_all(serde_json::to_vec(&SigningServerRequest::FetchCsr)?.as_slice()).await?;
+
+    let mut buffer = vec![0; 4096];
+    let bytes_read = stream.read_buf(&mut buffer).await?;
+
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+    let response: ServerResponse = serde_json::from_slice(&buffer[..bytes_read])?;
+
+    info!("GOT CA: {:?}", response);
+    Ok(None)
 }

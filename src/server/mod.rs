@@ -2,12 +2,13 @@ use crate::broadcast::DiscoveredDevice;
 use crate::challenge::{
     generate_challenge, ChallengeEvent, DefaultChallengeManager,
 };
-use crate::consts::DEFAULT_SERVER_PORT;
-use crate::device_manager::{get_device, DefaultDeviceManager};
+use crate::consts::{of_type, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
+use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
 use crate::keychain::server::sign_client_csr;
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
-use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, TcpServer};
-use crate::NetError;
+use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
+use crate::utils::get_server_cert_storage;
+use crate::CommonThreadError;
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::{server, ServerConnection};
@@ -24,6 +25,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tokio_rustls::TlsStream;
+use crate::keychain::load_cert;
 
 pub(crate) mod tls_utils;
 pub(crate) mod model;
@@ -42,11 +44,25 @@ pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sy
     let res = tokio::join!(
         tokio::spawn(start_server(Arc::clone(&server))),
         tokio::spawn(listen_actions(Arc::clone(&server))),
+        tokio::spawn(start_signing_server()),
     );
     Ok(())
 }
 
-pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
+pub async fn start_signing_server() -> Result<(), CommonThreadError> {
+    if !is_tcp_port_available(DEFAULT_SIGNING_SERVER_PORT).await {
+        panic!("Cannot start signing server on {}", DEFAULT_SIGNING_SERVER_PORT);
+    }
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", DEFAULT_SIGNING_SERVER_PORT)).await?;
+
+    loop {
+        let (stream, socket) = listener.accept().await?;
+        tokio::spawn(handle_ca_request(stream, socket));
+    }
+}
+
+
+pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadError> {
     if !is_tcp_port_available(DEFAULT_SERVER_PORT).await {
         panic!("Cannot start server on {}", DEFAULT_SERVER_PORT);
     }
@@ -113,16 +129,15 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), NetError> {
                             loop {
                                 while let Some(message) = res_receiver.recv().await {
                                     match message.clone() {
-                                        ServerResponse::SignedCertificate { device_id, cert_pem } => {
+                                        ServerResponse::SignedCertificate { device_id, .. } => {
                                             let connected_devices_arc = server_arc.connected_devices.lock().await;
                                             if let Some(_device) = connected_devices_arc.get(&device_id) {
-                                                send_response_to_client(_device.connection.clone(), ServerResponse::SignedCertificate {
-                                                    device_id: device_id.clone(),
-                                                    cert_pem: cert_pem.clone(),
-                                                }).await.expect(&format!("Cannot send message to the client: {:?}", message));
+                                                send_response_to_client(_device.connection.clone(), message.clone()).await
+                                                    .expect(&format!("Cannot send message to the client: {:?}", message));
                                             }
                                         }
                                         ServerResponse::Error { .. } => {}
+                                        ServerResponse::Certificate { .. } => {}
                                     }
                                 }
                             }
@@ -164,46 +179,6 @@ async fn handle_client_actions(
             ServerRequest::AcceptConnection(_) => {}
             ServerRequest::RejectConnection(_) => {
                 break;
-            }
-            ServerRequest::SignCsr { csr_pem } => {
-                info!("Received CSR from device {}. Attempting to sign...", device_id);
-                let response_sender = {
-                    let connected_devices_guard = server.connected_devices.lock().await;
-                    connected_devices_guard.get(&device_id)
-                        .map(|peer| peer.writer_response.clone())
-                };
-
-                if let Some(sender) = response_sender {
-                    let sign_result = spawn_blocking(move || {
-                        sign_client_csr(&csr_pem)
-                    }).await;
-                    match sign_result? {
-                        Ok(signed_cert_path) => {
-                            match fs::read_to_string(&signed_cert_path) {
-                                Ok(signed_cert_pem) => {
-                                    info!("CSR from device {} signed successfully.", device_id);
-                                    if let Err(e) = sender.send(ServerResponse::SignedCertificate { device_id: device_id.clone(), cert_pem: signed_cert_pem }).await {
-                                        error!("Failed to send signed certificate to {}: {}", device_id, e);
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to read signed certificate from path {}: {}", signed_cert_path.display(), e);
-                                    if let Err(e) = sender.send(ServerResponse::Error { message: format!("Failed to read signed certificate: {}", e) }).await {
-                                        error!("Failed to send error response to {}: {}", device_id, e);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to sign CSR for device {}: {}", device_id, e);
-                            if let Err(e) = sender.send(ServerResponse::Error { message: format!("Failed to sign CSR: {}", e) }).await {
-                                error!("Failed to send error response to {}: {}", device_id, e);
-                            }
-                        }
-                    }
-                } else {
-                    error!("Could not find response sender for device {}", device_id);
-                }
             }
         }
     }
@@ -318,6 +293,49 @@ async fn get_serialized_challenge(
     let serialized = serde_json::to_vec(&challenge_query)?;
     Ok(serialized)
 }
+
+async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<(), CommonThreadError> {
+    let ca_cert = fs::read_to_string(
+        get_server_cert_storage().join(CA_CERT_FILE_NAME)
+    ).unwrap_or_default();
+
+    match serde_json::from_str::<SigningServerRequest>(&ca_cert) {
+        Ok(request) => {
+            match request {
+                SigningServerRequest::FetchCsr => {
+                    if let Some(device) = get_device_by_socket(&socket).await {
+                        info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
+                        let loaded_crt = load_cert(false)?;
+                        
+                        stream.write_all(loaded_crt.pem().as_bytes()).await?;
+                        
+                        stream.flush().await?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            Err(of_type("Cannot sign client CA", ErrorKind::Other))
+        }
+    }
+}
+// 
+// async fn handle_device_csr_signing(csr_pem: String) -> Result<Vec<u8>, CommonThreadError> {
+//     let sign_result = spawn_blocking(move || {
+//         sign_client_csr(&csr_pem)
+//     }).await;
+// 
+//     match sign_result? {
+//         Ok((signed_cert, path)) => {
+//             Ok(signed_cert)
+//         }
+//         Err(e) => {
+//             error!("Failed to sign CSR");
+//             Err(e)
+//         }
+//     }
+// }
 
 async fn is_tcp_port_available(port: u16) -> bool {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

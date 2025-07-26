@@ -1,8 +1,7 @@
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
-use crate::consts::{DeviceId, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
+use crate::consts::{CommonThreadError, DeviceId, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
 use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
-use crate::NetError;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
@@ -80,7 +79,7 @@ impl DiscoveredDevice {
 // Device B receives the Response, computes the same hash using its knowledge of the passphrase and the nonce it sent, and compares it to Device A's response.
 // If hashes match, Device B authenticates Device A.
 
-pub async fn start_listener() -> Result<(), NetError> {
+pub async fn start_listener() -> Result<(), CommonThreadError> {
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(listen_addr).await?;
     info!("Broadcast listener started on {}", listen_addr);
@@ -149,7 +148,7 @@ pub async fn start_listener() -> Result<(), NetError> {
 pub async fn start_broadcast_announcer(
     listening_port: u16,
     local_ip: IpAddr,
-) -> Result<(), NetError> {
+) -> Result<(), CommonThreadError> {
     let broadcast_addr: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
     let socket = UdpSocket::bind(format!("{}:{}", local_ip, 0)).await?;
     socket.set_broadcast(true)?;

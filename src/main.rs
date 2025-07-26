@@ -1,6 +1,6 @@
 use crate::challenge::{cleanup, DefaultChallengeManager};
 use crate::client::DefaultClientManager;
-use crate::consts::{DeviceId, DEFAULT_LISTENING_PORT};
+use crate::consts::{CommonThreadError, DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::machine_utils::get_local_ip;
 use crate::server::{start_server, DefaultServer};
@@ -30,10 +30,8 @@ mod state;
 mod ui;
 mod utils;
 
-type NetError = Box<dyn Error + Send + Sync>;
-
 #[tokio::main]
-async fn main() -> Result<(), NetError> {
+async fn main() -> Result<(), CommonThreadError> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();

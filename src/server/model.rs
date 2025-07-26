@@ -3,8 +3,8 @@ use crate::keychain::{generate_cert_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
 use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
-use rustls::server::{ResolvesServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ServerConfig};
+use rustls::server::{ResolvesServerCert, WantsServerCert, WebPkiClientVerifier};
+use rustls::{crypto, ConfigBuilder, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -72,6 +72,11 @@ impl TcpServer {
 
         Ok(config)
     }
+
+    pub fn create_signing_server_config() -> ConfigBuilder<ServerConfig, WantsServerCert> {
+        ServerConfig::builder()
+            .with_no_client_auth()
+    }
 }
 
 pub struct StaticCertResolver {
@@ -131,9 +136,11 @@ pub enum ServerRequest {
     },
     AcceptConnection(String),
     RejectConnection(String),
-    SignCsr {
-        csr_pem: String
-    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SigningServerRequest {
+    FetchCsr
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -142,6 +149,9 @@ pub enum ServerResponse {
     SignedCertificate {
         device_id: String,
         cert_pem: String,
+    },
+    Certificate {
+        cert: String
     },
     Error {
         message: String,
