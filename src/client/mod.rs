@@ -16,17 +16,17 @@ use std::error::Error;
 use std::fs::File;
 use std::hash::Hash;
 use std::io;
-use std::io::{BufReader, ErrorKind};
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
-
-
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
         let (sender, receiver) = mpsc::channel::<ClientActivity>(500);
@@ -184,7 +184,7 @@ pub async fn request_ca(connection_addr: &SocketAddr) -> Result<Option<ServerRes
     stream.write_all(serde_json::to_vec(&SigningServerRequest::FetchCsr)?.as_slice()).await?;
 
     let mut buffer = vec![0; 4096];
-    let bytes_read = stream.read_buf(&mut buffer).await?;
+    let bytes_read = stream.read(&mut buffer).await?;
 
     if bytes_read == 0 {
         return Ok(None);
