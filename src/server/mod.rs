@@ -4,6 +4,7 @@ use crate::challenge::{
 };
 use crate::consts::{of_type, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
+use crate::keychain::load_cert;
 use crate::keychain::server::sign_client_csr;
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
 use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
@@ -25,7 +26,6 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tokio_rustls::TlsStream;
-use crate::keychain::load_cert;
 
 pub(crate) mod tls_utils;
 pub(crate) mod model;
@@ -55,6 +55,7 @@ pub async fn start_signing_server() -> Result<(), CommonThreadError> {
     }
     let listener = TcpListener::bind(format!("0.0.0.0:{}", DEFAULT_SIGNING_SERVER_PORT)).await?;
 
+    info!("Signing server started at: {}", listener.local_addr()?.ip().to_string());
     loop {
         let (stream, socket) = listener.accept().await?;
         tokio::spawn(handle_ca_request(stream, socket));
@@ -305,11 +306,9 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
                 SigningServerRequest::FetchCsr => {
                     if let Some(device) = get_device_by_socket(&socket).await {
                         info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
-                        let loaded_crt = load_cert(false)?;
-                        
-                        stream.write_all(loaded_crt.pem().as_bytes()).await?;
-                        
-                        stream.flush().await?;
+                        // let loaded_crt = load_cert(false)?;
+
+                        stream.write_all("Xx".as_bytes()).await?;
                     }
                 }
             }
@@ -320,12 +319,12 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
         }
     }
 }
-// 
+//
 // async fn handle_device_csr_signing(csr_pem: String) -> Result<Vec<u8>, CommonThreadError> {
 //     let sign_result = spawn_blocking(move || {
 //         sign_client_csr(&csr_pem)
 //     }).await;
-// 
+//
 //     match sign_result? {
 //         Ok((signed_cert, path)) => {
 //             Ok(signed_cert)
