@@ -307,12 +307,16 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
                 SigningServerRequest::FetchCsr => {
                     if let Some(device) = get_device_by_socket(&socket).await {
                         info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
-                        // let ca_cert = fs::read_to_string(
-                        //     get_server_cert_storage().join(CA_CERT_FILE_NAME)
-                        // ).unwrap_or_default();
+                        let ca_cert = fs::read_to_string(
+                            get_server_cert_storage().join(CA_CERT_FILE_NAME)
+                        ).unwrap_or_default();
                         
+                        stream.write_all( serde_json::to_vec(
+                            &ServerResponse::Certificate {
+                                cert: ca_cert.clone()
+                            }
+                        )?.as_slice()).await?;
                     }
-                    stream.write_all("xx".as_bytes()).await?;
                 }
             }
             Ok(())
