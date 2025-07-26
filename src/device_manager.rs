@@ -132,9 +132,10 @@ pub async fn get_device(device_id: String) -> Option<DiscoveredDevice> {
 }
 
 pub async fn get_device_by_socket(socket_addr: &SocketAddr) -> Option<DiscoveredDevice> {
-    let device_manager = Arc::new(&DefaultDeviceManager);
-    match device_manager.known_devices.read().await.iter().find(|(x, d)| d.connect_addr.eq(socket_addr)) {
+    let manager = Arc::clone(&DefaultDeviceManager);
+    let devices = manager.known_devices.read().await;
+    match devices.iter().find(|(_key, d)| d.connect_addr.ip() == socket_addr.ip()) {
+        Some((_key, device)) => Some(device.clone()),
         None => None,
-        Some(dv) => Some(dv.1.clone()),
     }
 }
