@@ -184,7 +184,7 @@ pub async fn request_ca(connection_addr: &SocketAddr) -> Result<Option<ServerRes
     stream.write_all(serde_json::to_vec(&SigningServerRequest::FetchCsr)?.as_slice()).await?;
 
     let mut buffer = vec![0; 4096];
-    let bytes_read = stream.read(&mut buffer).await?;
+    let bytes_read = stream.read_buf(&mut buffer).await?;
 
     if bytes_read == 0 {
         return Ok(None);
