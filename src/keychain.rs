@@ -177,7 +177,7 @@ pub mod node {
 
         Ok((node_cert_path, node_key_path))
     }
-    
+
     pub mod load {
         use std::fs;
         use std::io::Cursor;
@@ -185,7 +185,7 @@ pub mod node {
         use crate::consts::CommonThreadError;
         use crate::utils::get_default_application_dir;
 
-        pub fn load_client_cert_pem(device_id: &str) -> Result<String, CommonThreadError> {
+        pub fn load_node_cert_pem(device_id: &str) -> Result<String, CommonThreadError> {
             let app_data_dir = get_default_application_dir();
             let client_cert_path = app_data_dir.join(format!("{}_client_cert.pem", device_id));
 
@@ -199,7 +199,7 @@ pub mod node {
             Ok(cert_pem)
         }
 
-        pub fn load_client_key_pem(device_id: &str) -> Result<String, CommonThreadError> {
+        pub fn load_node_key_pem(device_id: &str) -> Result<String, CommonThreadError> {
             let app_data_dir = get_default_application_dir();
             let client_key_path = app_data_dir.join(format!("{}_client_key.pem", device_id));
 
@@ -213,8 +213,8 @@ pub mod node {
             Ok(key_pem)
         }
 
-        pub fn load_client_cert_der(device_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
-            let cert_pem = load_client_cert_pem(device_id)?;
+        pub fn load_node_cert_der(device_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
+            let cert_pem = load_node_cert_pem(device_id)?;
 
             let mut cert_reader = Cursor::new(cert_pem.as_bytes());
             let cert_der = rustls_pemfile::certs(&mut cert_reader)
@@ -225,8 +225,8 @@ pub mod node {
             Ok(cert_der)
         }
 
-        pub fn load_client_key_der(device_id: &str) -> Result<PrivateKeyDer<'static>, CommonThreadError> {
-            let key_pem = load_client_key_pem(device_id)?;
+        pub fn load_node_key_der(device_id: &str) -> Result<PrivateKeyDer<'static>, CommonThreadError> {
+            let key_pem = load_node_key_pem(device_id)?;
 
             let mut key_reader = Cursor::new(key_pem.as_bytes());
             let key_der = rustls_pemfile::private_key(&mut key_reader)
@@ -316,16 +316,33 @@ pub fn node_params(device: Option<String>) -> CertificateParams {
 }
 
 pub mod server {
-    use crate::consts::{CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME};
+    use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME};
 
-    use crate::keychain::{load_cert, load_private_key, node_params};
-    use crate::utils::{get_client_cert_storage, get_server_cert_storage};
+    use crate::keychain::{generate_cert_keys, load_cert, load_private_key, node_params};
+    use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
     use log::info;
     use rcgen::{date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
     use std::error::Error;
     use std::fs;
     use std::fs::File;
+    use std::io::ErrorKind;
     use std::path::PathBuf;
+
+    pub fn load_server_crt_pem() -> Result<String, CommonThreadError> {
+        let cert_path = get_server_cert_storage().join(&CA_CERT_FILE_NAME);
+
+        if !cert_path.exists() {
+            let (generated_cert, _ ) = generate_signing_ca()?;
+            if !generated_cert.exists() {
+                return Err(of_type("Cannot fetch server CRT", ErrorKind::Other));
+            }
+        }
+
+        let crt = fs::read_to_string(&cert_path)
+            .map_err(|e| format!("Failed to read CRT: {}", e))?;
+
+        Ok(crt)
+    }
 
     pub fn generate_signing_ca() -> Result<(PathBuf, PathBuf), CommonThreadError> {
         let (ca_path, kp_path) = {

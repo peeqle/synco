@@ -1,7 +1,7 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::keychain::node::load::load_client_cert_der;
+use crate::keychain::node::load::load_node_cert_der;
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
@@ -83,7 +83,7 @@ impl TcpClient {
 
         let ca_verification = {
             let mut root_store = RootCertStore::empty();
-            match load_client_cert_der(&server_id) {
+            match load_node_cert_der(&server_id) {
                 Ok(crt) => {
                     root_store.add(crt).expect(&format!("Cannot load specified CRT for {}", server_id));
                 }
@@ -135,11 +135,15 @@ async fn listen(_manager: Arc<ClientManager>) {
                     if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
                         request_ca(&device).await.expect(&format!("Cannot fetch requested CA from: {}", &device_id));
                         //request server sign on client's csr
-                        let signed_cert = request_signed_cert(device).await;
-
-
-                        open_connection(device_id.clone()).await
-                            .expect(&format!("Cannot open connection for: {}", device_id));
+                        match request_signed_cert(device).await {
+                            Ok(_) => {
+                                open_connection(device_id.clone()).await
+                                    .expect(&format!("Cannot open connection for: {}", device_id));
+                            }
+                            Err(_) => {
+                                error!("Cannot open connection to {} due to crt request error", device_id)
+                            }
+                        }
                     }
                 }
             }
@@ -199,7 +203,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 }
 
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
-    let response = call_signing_server(SigningServerRequest::FetchCsr, _device).await?;
+    let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await?;
 
     if let ServerResponse::Certificate { cert } = response.unwrap() {
         save_server_cert(_device.device_id.clone(), cert).expect("Cannot save server CA");
@@ -210,19 +214,20 @@ pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerRespo
     Ok(None)
 }
 
-pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
+pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), CommonThreadError> {
     let (csr_pem, node_keypair) = generate_node_csr(_device.device_id.clone())?;
 
     if let Some(response) = call_signing_server(SigningServerRequest::SignCsr {
         csr: csr_pem
     }, _device).await.expect("Cannot execute call to signing server") {
         if let ServerResponse::SignedCertificate { device_id, cert_pem } = response {
-            let (node_cert_path, node_key_path) = save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
+            info!("Got CRT: {}", &cert_pem);
+            save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
         } else {
             return Err(of_type(&format!("Cannot perform signing request from {}", _device.device_id), ErrorKind::Other));
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 pub async fn call_signing_server(req: SigningServerRequest, _device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
