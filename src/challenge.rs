@@ -171,7 +171,6 @@ pub async fn challenge_listener(
     manager: Arc<ChallengeManager>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let challenge_manager = manager.clone();
-    //todo replace with dyn servers
     let _client = Arc::clone(&DefaultClientManager);
 
     let receiver_mutex = &challenge_manager.bounded_channel.1;
