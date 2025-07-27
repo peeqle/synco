@@ -133,18 +133,42 @@ async fn listen(_manager: Arc<ClientManager>) {
                 if empty {
                     let device_manager = Arc::clone(&DefaultDeviceManager);
                     if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
-                        request_ca(&device).await.expect(&format!("Cannot fetch requested CA from: {}", &device_id));
-                        //request server sign on client's csr
-                        match request_signed_cert(device).await {
+                        info!("Starting certificate setup for device: {}", device_id);
+                        
+                        // Request CA certificate
+                        match request_ca(&device).await {
                             Ok(_) => {
-                                open_connection(device_id.clone()).await
-                                    .expect(&format!("Cannot open connection for: {}", device_id));
+                                info!("CA certificate fetched successfully for device: {}", device_id);
+                                
+                                // Request server sign on client's CSR
+                                match request_signed_cert(device).await {
+                                    Ok(_) => {
+                                        info!("Client certificate signed successfully for device: {}", device_id);
+                                        
+                                        // Now open the connection
+                                        match open_connection(device_id.clone()).await {
+                                            Ok(_) => {
+                                                info!("Connection opened successfully for device: {}", device_id);
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to open connection for device {}: {}", device_id, e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to get signed certificate for device {}: {}", device_id, e);
+                                    }
+                                }
                             }
                             Err(e) => {
-                                error!("Cannot open connection to {} due to crt request error: {}", device_id, e)
+                                error!("Failed to fetch CA certificate for device {}: {}", device_id, e);
                             }
                         }
+                    } else {
+                        error!("Device {} not found in known devices registry", device_id);
                     }
+                } else {
+                    info!("Connection already exists for device: {}", device_id);
                 }
             }
         }
@@ -162,34 +186,50 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     info!("Opening connection to: {}", &server_id);
 
     let device_manager = Arc::clone(&DefaultDeviceManager);
+    info!("Looking up device {} in known devices", server_id);
+    
     let device = device_manager
         .known_devices
         .read()
         .await
         .get(&server_id)
         .cloned()
-        .ok_or_else(|| format!("Device not found: {}", server_id))?;
+        .ok_or_else(|| {
+            error!("Device not found in known devices: {}", server_id);
+            format!("Device not found: {}", server_id)
+        })?;
 
+    info!("Device found: {} at {}", device.device_id, device.connect_addr);
+
+    info!("Checking if client certificate exists for device: {}", server_id);
     if !node_cert_exists(&server_id) {
+        error!("Client certificate not found for device: {}", server_id);
         return Err(format!(
             "Client certificate not found for device: {}. Run certificate setup first.",
             server_id
         ).into());
     }
+    info!("Client certificate exists for device: {}", server_id);
 
     let ca_cert_path = get_server_cert_storage().join(format!("{}_ca.crt", server_id));
+    info!("Checking CA certificate at path: {}", ca_cert_path.display());
     if !ca_cert_path.exists() {
+        error!("CA certificate not found at: {}", ca_cert_path.display());
         return Err(format!(
             "CA certificate not found for server: {}. Run certificate setup first.",
             server_id
         ).into());
     }
+    info!("CA certificate exists at: {}", ca_cert_path.display());
 
     info!("Connecting to: {}", device.connect_addr);
     let stream = TcpStream::connect(&device.connect_addr).await
-        .map_err(|e| format!("Failed to connect to {}: {}", device.connect_addr, e))?;
+        .map_err(|e| {
+            error!("Failed to connect to {}: {}", device.connect_addr, e);
+            format!("Failed to connect to {}: {}", device.connect_addr, e)
+        })?;
 
-    info!("Creating TLS client configuration for: {}", server_id);
+    info!("TCP connection established, creating TLS client configuration for: {}", server_id);
     let client = TcpClient::new(device.device_id.clone())?;
     let connector = TlsConnector::from(client.configuration.clone());
 
