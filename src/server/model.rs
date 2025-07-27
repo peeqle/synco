@@ -140,7 +140,10 @@ pub enum ServerRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SigningServerRequest {
-    FetchCsr
+    FetchCsr,
+    SignCsr {
+        csr: String
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
