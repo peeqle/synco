@@ -13,6 +13,7 @@ use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
+use der::Writer;
 
 pub mod control {
     use std::error::Error;
@@ -118,13 +119,9 @@ pub fn save_server_cert(device_id: String, cert: String) -> Result<(), CommonThr
     fs::create_dir_all(&dir)?;
 
     let file_path = dir.join(CERT_FILE_NAME);
-    if !fs::exists(&file_path)? {
-        File::create_new(&file_path)?;
-    }
-    let mut file = File::open(&file_path)?;
-    file.write_all(cert.as_bytes())?;
+    let mut file = File::create(&file_path)?;
 
-    info!("Saved {} CA at {}", device_id, file_path.to_str().unwrap());
+    file.write_all(cert.as_bytes())?;
 
     Ok(())
 }
