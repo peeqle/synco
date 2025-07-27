@@ -1,7 +1,7 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::keychain::node::load::load_node_cert_der;
+use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
@@ -160,74 +160,114 @@ async fn listen(_manager: Arc<ClientManager>) {
 
 async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     info!("Opening connection to: {}", &server_id);
+
     let device_manager = Arc::clone(&DefaultDeviceManager);
-    if let Some(device) = device_manager.known_devices.read().await.get(&server_id) {
-        let stream = TcpStream::connect(&device.connect_addr).await?;
+    let device = device_manager
+        .known_devices
+        .read()
+        .await
+        .get(&server_id)
+        .cloned()
+        .ok_or_else(|| format!("Device not found: {}", server_id))?;
 
-        let client = TcpClient::new(device.device_id.clone())?;
-        let connector = TlsConnector::from(client.configuration.clone());
-
-        if let Ok(e) = connector.connect(ServerName::IpAddress(
-            rustls_pki_types::IpAddr::V4(rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?)), stream).await {
-            info!("TLS connection to: {} is established.", server_id);
-            
-            let (client_sender, mut client_receiver) = mpsc::channel(200);
-            let mut mtx = client.connection.lock().await;
-
-            let new_peer = ClientTcpPeer {
-                connection: Arc::new(Mutex::new(e)),
-                connection_status: Unknown,
-                sender: client_sender,
-            };
-
-            let connection_listener = Arc::clone(&new_peer.connection);
-            tokio::spawn(async move {
-                let mut buffer = vec![0; 4096];
-
-                loop {
-                    let mut locked_connection = connection_listener.lock().await;
-
-                    let bytes_read = match locked_connection.read(&mut buffer).await {
-                        Ok(0) => {
-                            println!("Connection closed");
-                            break;
-                        }
-                        Ok(n) => n,
-                        Err(e) => {
-                            eprintln!("Tls read error: {}", e);
-                            break;
-                        }
-                    };
-
-                    let received_data = String::from_utf8_lossy(&buffer[..bytes_read]);
-                    println!("Получено {} байт: {}", bytes_read, received_data);
-                }
-            });
-
-            mtx.replace(new_peer);
-            drop(mtx);
-            {
-                tokio::spawn(async move {
-                    loop {
-                        while let Some(message) = client_receiver.recv().await {
-                            info!("MESSAGE: {}", message);
-                        }
-                    }
-                });
-            }
-            
-            info!("Client created: {:?}", &client);
-            let _manager = Arc::clone(&DefaultClientManager);
-            let mut mtx = _manager.connections.lock().await;
-            mtx.insert(device.device_id.clone(), client);
-            drop(mtx);
-            
-        }
+    if let Err(e) = load_node_cert_pem(&server_id) {
+        return Err(format!(
+            "Client certificate not found for device: {}. Run certificate setup first.",
+            server_id
+        ).into());
     }
 
-    Err(Box::new(io::Error::new(ErrorKind::BrokenPipe, format!("Cannot open new Tcp Client for {}", server_id))))
-}
+    let ca_cert_path = get_server_cert_storage().join(format!("{}_ca.crt", server_id));
+    if !ca_cert_path.exists() {
+        return Err(format!(
+            "CA certificate not found for server: {}. Run certificate setup first.",
+            server_id
+        ).into());
+    }
 
+    info!("Connecting to: {}", device.connect_addr);
+    let stream = TcpStream::connect(&device.connect_addr).await
+        .map_err(|e| format!("Failed to connect to {}: {}", device.connect_addr, e))?;
+
+    info!("Creating TLS client configuration for: {}", server_id);
+    let client = TcpClient::new(device.device_id.clone())?;
+    let connector = TlsConnector::from(client.configuration.clone());
+
+    info!("Establishing TLS connection to: {}", server_id);
+    let tls_stream = connector
+        .connect(
+            ServerName::IpAddress(rustls_pki_types::IpAddr::V4(
+                rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?
+            )),
+            stream
+        )
+        .await
+        .map_err(|e| {
+            error!("TLS handshake failed with {}: {}", server_id, e);
+            format!("TLS connection failed: {}", e)
+        })?;
+
+    info!("TLS connection established successfully with: {}", server_id);
+
+    let (client_sender, mut client_receiver) = mpsc::channel(200);
+
+    let new_peer = ClientTcpPeer {
+        connection: Arc::new(Mutex::new(tls_stream)),
+        connection_status: Unknown,
+        sender: client_sender,
+    };
+
+    let connection_reader = Arc::clone(&new_peer.connection);
+    let reader_server_id = server_id.clone();
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 4096];
+
+        loop {
+            let bytes_read = {
+                let mut locked_connection = connection_reader.lock().await;
+                match locked_connection.read(&mut buffer).await {
+                    Ok(0) => {
+                        info!("Connection closed by server: {}", reader_server_id);
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!("TLS read error from {}: {}", reader_server_id, e);
+                        break;
+                    }
+                }
+            };
+
+            let received_data = String::from_utf8_lossy(&buffer[..bytes_read]);
+            info!("Received {} bytes from {}: {}", bytes_read, reader_server_id, received_data);
+        }
+
+        info!("Connection reader task ended for: {}", reader_server_id);
+    });
+
+    let handler_server_id = server_id.clone();
+    tokio::spawn(async move {
+        while let Some(message) = client_receiver.recv().await {
+            info!("Processing message from {}: {}", handler_server_id, message);
+        }
+        info!("Message handler task ended for: {}", handler_server_id);
+    });
+
+    {
+        let mut client_connection = client.connection.lock().await;
+        client_connection.replace(new_peer);
+    }
+
+    {
+        let manager = Arc::clone(&DefaultClientManager);
+        let mut connections = manager.connections.lock().await;
+        connections.insert(device.device_id.clone(), client);
+        info!("Client connection stored for device: {}", server_id);
+    }
+
+    info!("Connection setup completed for: {}", server_id);
+    Ok(())
+}
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await?;
 
