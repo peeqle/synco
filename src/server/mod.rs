@@ -2,10 +2,10 @@ use crate::broadcast::DiscoveredDevice;
 use crate::challenge::{
     generate_challenge, ChallengeEvent, DefaultChallengeManager,
 };
-use crate::consts::{of_type, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
+use crate::consts::{of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::keychain::load_cert;
-use crate::keychain::server::sign_client_csr;
+use crate::keychain::server::{load_server_crt_pem, sign_client_csr};
+use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
 use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
 use crate::utils::get_server_cert_storage;
@@ -300,16 +300,15 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
     let bytes_read = stream.read(&mut buffer).await
         .map_err(|e| of_type("Failed to read client request", ErrorKind::Other))?;
 
+    let current_device_id = DeviceId.clone();
 
     match serde_json::from_slice::<SigningServerRequest>(&buffer[..bytes_read]) {
         Ok(request) => {
             match request {
-                SigningServerRequest::FetchCsr => {
+                SigningServerRequest::FetchCrt => {
                     if let Some(device) = get_device_by_socket(&socket).await {
                         info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
-                        let ca_cert = fs::read_to_string(
-                            get_server_cert_storage().join(CA_CERT_FILE_NAME)
-                        ).expect("Cannot load system CA");
+                        let ca_cert = load_server_crt_pem()?;
 
                         stream.write_all(&serde_json::to_vec(
                             &ServerResponse::Certificate {
@@ -318,7 +317,15 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
                         )?).await?;
                     }
                 }
-                SigningServerRequest::SignCsr { .. } => {}
+                SigningServerRequest::SignCsr { csr } => {
+                    let (signed_crt, _) = sign_client_csr(&csr)?;
+                    stream.write_all(&serde_json::to_vec(
+                        &ServerResponse::SignedCertificate {
+                            device_id: current_device_id,
+                            cert_pem: String::from_utf8_lossy(signed_crt.as_slice()).to_string(),
+                        }
+                    )?).await?;
+                }
             }
             Ok(())
         }
