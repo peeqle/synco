@@ -19,6 +19,8 @@ use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{fs, io};
+use std::thread::sleep;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -123,6 +125,14 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                                     ).await.expect("Pipe broken: handle_client_actions");
                                 });
                             }
+
+                            let connection = device_connection.connection.clone();
+                            tokio::spawn(async move {
+                                let mut  mtx = connection.lock().await;
+                                let(c, m) = mtx.get_mut();
+                                m.writer().write_all(b"Ping").unwrap();
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            });
                         }
 
 
