@@ -169,6 +169,8 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
         if let Ok(e) = connector.connect(ServerName::IpAddress(
             rustls_pki_types::IpAddr::V4(rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?)), stream).await {
+            info!("TLS connection to: {} is established.", server_id);
+            
             let (client_sender, mut client_receiver) = mpsc::channel(200);
             let mut mtx = client.connection.lock().await;
 
@@ -213,15 +215,14 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
                     }
                 });
             }
+            
+            info!("Client created: {:?}", &client);
+            let _manager = Arc::clone(&DefaultClientManager);
+            let mut mtx = _manager.connections.lock().await;
+            mtx.insert(device.device_id.clone(), client);
+            drop(mtx);
+            
         }
-
-        info!("Client created: {:?}", &client);
-        let _manager = Arc::clone(&DefaultClientManager);
-        let mut mtx = _manager.connections.lock().await;
-        mtx.insert(device.device_id.clone(), client);
-        drop(mtx);
-
-        return Ok(());
     }
 
     Err(Box::new(io::Error::new(ErrorKind::BrokenPipe, format!("Cannot open new Tcp Client for {}", server_id))))
@@ -230,7 +231,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await?;
 
-    if let ServerResponse::Certificate { cert } = response.unwrap() {
+    if let Some(ServerResponse::Certificate { cert }) = response {
         if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
             error!("Error while saving server CRT: {}", e);
             return Err(e);
