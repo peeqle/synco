@@ -172,13 +172,38 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             let (client_sender, mut client_receiver) = mpsc::channel(200);
             let mut mtx = client.connection.lock().await;
 
-            mtx.replace(ClientTcpPeer {
+            let new_peer = ClientTcpPeer {
                 connection: Arc::new(Mutex::new(e)),
                 connection_status: Unknown,
                 sender: client_sender,
-            });
-            drop(mtx);
+            };
 
+            let connection_listener = Arc::clone(&new_peer.connection);
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+
+                loop {
+                    let mut locked_connection = connection_listener.lock().await;
+
+                    let bytes_read = match locked_connection.read(&mut buffer).await {
+                        Ok(0) => {
+                            println!("Connection closed");
+                            break;
+                        }
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("Tls read error: {}", e);
+                            break;
+                        }
+                    };
+
+                    let received_data = String::from_utf8_lossy(&buffer[..bytes_read]);
+                    println!("Получено {} байт: {}", bytes_read, received_data);
+                }
+            });
+
+            mtx.replace(new_peer);
+            drop(mtx);
             {
                 tokio::spawn(async move {
                     loop {
@@ -208,7 +233,7 @@ pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerRespo
     if let ServerResponse::Certificate { cert } = response.unwrap() {
         if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
             error!("Error while saving server CRT: {}", e);
-            return Err(e)
+            return Err(e);
         }
     } else {
         return Err(of_type("Certificate fetch has failed!", ErrorKind::Other));
