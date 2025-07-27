@@ -169,6 +169,8 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
         if let Ok(e) = connector.connect(ServerName::IpAddress(
             rustls_pki_types::IpAddr::V4(rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?)), stream).await {
+            info!("TLS connection to: {} is established.", server_id);
+            
             let (client_sender, mut client_receiver) = mpsc::channel(200);
             let mut mtx = client.connection.lock().await;
 
