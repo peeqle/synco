@@ -226,6 +226,7 @@ pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), Commo
         if let ServerResponse::SignedCertificate { device_id, cert_pem } = response {
             info!("Got CRT: {}", &cert_pem);
             save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
+            return Ok(());
         } else {
             return Err(of_type(&format!("Cannot perform signing request from {}", _device.device_id), ErrorKind::Other));
         }
