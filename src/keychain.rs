@@ -183,8 +183,27 @@ pub mod node {
         use std::io::Cursor;
         use log::info;
         use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-        use crate::consts::CommonThreadError;
-        use crate::utils::get_default_application_dir;
+        use crate::consts::{CommonThreadError, CERT_FILE_NAME};
+        use crate::utils::{get_default_application_dir, get_server_cert_storage};
+
+        pub fn load_server_ca_cert_der(server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
+            let ca_cert_path = get_server_cert_storage().join(server_id).join(CERT_FILE_NAME);
+
+            if !ca_cert_path.exists() {
+                return Err(format!("Server CA certificate not found at: {}", ca_cert_path.display()).into());
+            }
+
+            let ca_cert_pem = fs::read_to_string(&ca_cert_path)
+                .map_err(|e| format!("Failed to read server CA certificate: {}", e))?;
+
+            let mut cert_reader = std::io::Cursor::new(ca_cert_pem.as_bytes());
+            let ca_cert_der = rustls_pemfile::certs(&mut cert_reader)
+                .next()
+                .ok_or("No certificate found in server CA PEM file")?
+                .map_err(|e| format!("Failed to parse server CA certificate: {}", e))?;
+
+            Ok(ca_cert_der)
+        }
         
         pub fn node_cert_exists(device_id: &str) -> bool {
             let app_data_dir = get_default_application_dir();

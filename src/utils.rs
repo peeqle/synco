@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 use der::Writer;
+use rustls_pki_types::CertificateDer;
 
 pub mod control {
     use std::error::Error;

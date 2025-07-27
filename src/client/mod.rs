@@ -1,7 +1,7 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
+use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, node_cert_exists};
+use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_server_ca_cert_der, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
@@ -78,20 +78,22 @@ impl TcpClient {
     }
 
     fn create_client_config(server_id: String) -> Result<ClientConfig, CommonThreadError> {
+        info!("Creating client TLS config for server: {}", server_id);
+
         let pk = load_private_key_der()?;
         let cert = load_cert_der()?;
+        info!("Loaded client private key and certificate");
 
         let ca_verification = {
             let mut root_store = RootCertStore::empty();
-            match load_node_cert_der(&server_id) {
-                Ok(crt) => {
-                    root_store.add(crt).expect(&format!("Cannot load specified CRT for {}", server_id));
-                }
-                Err(_) => {
-                    return Err(of_type("Error loading server CRT to RootStore", ErrorKind::Other))
-                }
-            };
 
+            info!("Loading server CA certificate for: {}", server_id);
+            let ca_cert_der = load_server_ca_cert_der(&server_id)?;
+
+            root_store.add(ca_cert_der)
+                .map_err(|e| format!("Cannot add server CA certificate to RootStore: {:?}", e))?;
+
+            info!("Successfully loaded server CA certificate for: {}", server_id);
             root_store
         };
 
@@ -99,6 +101,7 @@ impl TcpClient {
             WebPkiServerVerifier::builder(Arc::new(ca_verification))
                 .build()
                 .map_err(|e| {
+                    error!("Failed to build client verifier: {:?}", e);
                     io::Error::new(
                         ErrorKind::InvalidInput,
                         format!("Failed to build client verifier: {:?}", e),
@@ -108,7 +111,13 @@ impl TcpClient {
 
         let config = ClientConfig::builder()
             .with_webpki_verifier(client_cert_verifier)
-            .with_client_auth_cert(vec![cert], pk)?;
+            .with_client_auth_cert(vec![cert], pk)
+            .map_err(|e| {
+                error!("Failed to create client config with client auth: {:?}", e);
+                format!("Failed to create client config: {:?}", e)
+            })?;
+
+        info!("Successfully created TLS client configuration for: {}", server_id);
         Ok(config)
     }
 }
@@ -134,18 +143,15 @@ async fn listen(_manager: Arc<ClientManager>) {
                     let device_manager = Arc::clone(&DefaultDeviceManager);
                     if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
                         info!("Starting certificate setup for device: {}", device_id);
-                        
-                        // Request CA certificate
+
                         match request_ca(&device).await {
                             Ok(_) => {
                                 info!("CA certificate fetched successfully for device: {}", device_id);
-                                
-                                // Request server sign on client's CSR
+
                                 match request_signed_cert(device).await {
                                     Ok(_) => {
                                         info!("Client certificate signed successfully for device: {}", device_id);
-                                        
-                                        // Now open the connection
+
                                         match open_connection(device_id.clone()).await {
                                             Ok(_) => {
                                                 info!("Connection opened successfully for device: {}", device_id);
@@ -187,7 +193,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
     let device_manager = Arc::clone(&DefaultDeviceManager);
     info!("Looking up device {} in known devices", server_id);
-    
+
     let device = device_manager
         .known_devices
         .read()
@@ -211,7 +217,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     }
     info!("Client certificate exists for device: {}", server_id);
 
-    let ca_cert_path = get_server_cert_storage().join(format!("{}_ca.crt", server_id));
+    let ca_cert_path = get_server_cert_storage().join(&server_id).join(CERT_FILE_NAME);
     info!("Checking CA certificate at path: {}", ca_cert_path.display());
     if !ca_cert_path.exists() {
         error!("CA certificate not found at: {}", ca_cert_path.display());
@@ -363,17 +369,17 @@ pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), Commo
 
 pub async fn call_signing_server(req: SigningServerRequest, _device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     let server_addr = SocketAddr::new(
-        IpAddr::try_from(Ipv4Addr::from_str(&_device.connect_addr.ip().to_string())?)?, 
+        IpAddr::try_from(Ipv4Addr::from_str(&_device.connect_addr.ip().to_string())?)?,
         DEFAULT_SIGNING_SERVER_PORT);
-    
+
     info!("Connecting to signing server at {} for device {}", server_addr, _device.device_id);
-    
+
     let mut stream = TcpStream::connect(server_addr).await
         .map_err(|e| format!("Failed to connect to signing server at {}: {}", server_addr, e))?;
 
     let serialized_req = serde_json::to_vec(&req)?;
     info!("Sending request to signing server: {} bytes", serialized_req.len());
-    
+
     stream.write_all(serialized_req.as_slice()).await
         .map_err(|e| format!("Failed to send request to signing server: {}", e))?;
 
@@ -387,12 +393,12 @@ pub async fn call_signing_server(req: SigningServerRequest, _device: &Discovered
         error!("Signing server sent empty response for device {}", _device.device_id);
         return Ok(None);
     }
-    
+
     match serde_json::from_slice(&buffer[..bytes_read_total]) {
         Ok(resp) => {
             info!("Successfully parsed server response");
             Ok(Some(resp))
-        },
+        }
         Err(e) => {
             error!("Failed to deserialize server response for device {}. Raw data: '{}', Error: {}", 
                    _device.device_id, String::from_utf8_lossy(&buffer), e);
