@@ -317,30 +317,64 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
             match request {
                 SigningServerRequest::FetchCrt => {
                     if let Some(device) = get_device_by_socket(&socket).await {
-                        info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
-                        let ca_cert = load_server_crt_pem()?;
-
+                        info!("Received CRT request from device {}. Attempting to load origin CA...", device.device_id);
+                        match load_server_crt_pem() {
+                            Ok(ca_cert) => {
+                                stream.write_all(&serde_json::to_vec(
+                                    &ServerResponse::Certificate {
+                                        cert: ca_cert.clone()
+                                    }
+                                )?).await?;
+                            }
+                            Err(e) => {
+                                error!("Failed to load server certificate: {}", e);
+                                stream.write_all(&serde_json::to_vec(
+                                    &ServerResponse::Error {
+                                        message: format!("Failed to load server certificate: {}", e)
+                                    }
+                                )?).await?;
+                            }
+                        }
+                    } else {
+                        error!("Device not found for IP address: {}. Device must be discovered first through UDP broadcast.", socket.ip());
                         stream.write_all(&serde_json::to_vec(
-                            &ServerResponse::Certificate {
-                                cert: ca_cert.clone()
+                            &ServerResponse::Error {
+                                message: format!("Device not found for IP address: {}. Device must be discovered first through UDP broadcast.", socket.ip())
                             }
                         )?).await?;
                     }
                 }
                 SigningServerRequest::SignCsr { csr } => {
-                    let (signed_crt, _) = sign_client_csr(&csr)?;
-                    stream.write_all(&serde_json::to_vec(
-                        &ServerResponse::SignedCertificate {
-                            device_id: current_device_id,
-                            cert_pem: String::from_utf8_lossy(signed_crt.as_slice()).to_string(),
+                    match sign_client_csr(&csr) {
+                        Ok((signed_crt, _)) => {
+                            stream.write_all(&serde_json::to_vec(
+                                &ServerResponse::SignedCertificate {
+                                    device_id: current_device_id,
+                                    cert_pem: String::from_utf8_lossy(signed_crt.as_slice()).to_string(),
+                                }
+                            )?).await?;
                         }
-                    )?).await?;
+                        Err(e) => {
+                            error!("Failed to sign client CSR: {}", e);
+                            stream.write_all(&serde_json::to_vec(
+                                &ServerResponse::Error {
+                                    message: format!("Failed to sign client CSR: {}", e)
+                                }
+                            )?).await?;
+                        }
+                    }
                 }
             }
             Ok(())
         }
         Err(e) => {
-            Err(of_type("Cannot sign client CA", ErrorKind::Other))
+            error!("Failed to deserialize signing server request: {}", e);
+            stream.write_all(&serde_json::to_vec(
+                &ServerResponse::Error {
+                    message: format!("Invalid request format: {}", e)
+                }
+            )?).await?;
+            Ok(())
         }
     }
 }

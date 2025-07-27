@@ -1,7 +1,7 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem};
+use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
@@ -170,7 +170,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         .cloned()
         .ok_or_else(|| format!("Device not found: {}", server_id))?;
 
-    if let Err(e) = load_node_cert_pem(&server_id) {
+    if !node_cert_exists(&server_id) {
         return Err(format!(
             "Client certificate not found for device: {}. Run certificate setup first.",
             server_id
@@ -199,7 +199,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             ServerName::IpAddress(rustls_pki_types::IpAddr::V4(
                 rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?
             )),
-            stream
+            stream,
         )
         .await
         .map_err(|e| {
@@ -271,13 +271,26 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await?;
 
-    if let Some(ServerResponse::Certificate { cert }) = response {
-        if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
-            error!("Error while saving server CRT: {}", e);
-            return Err(e);
+    if let Some(server_response) = response {
+        match server_response {
+            ServerResponse::Certificate { cert } => {
+                if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
+                    error!("Error while saving server CRT: {}", e);
+                    return Err(e);
+                }
+            }
+            ServerResponse::Error { message } => {
+                error!("Server error during certificate fetch: {}", message);
+                return Err(of_type(&format!("Certificate fetch failed: {}", message), ErrorKind::Other));
+            }
+            _ => {
+                error!("Unexpected response type for certificate fetch request");
+                return Err(of_type("Certificate fetch failed: Unexpected response type", ErrorKind::Other));
+            }
         }
     } else {
-        return Err(of_type("Certificate fetch has failed!", ErrorKind::Other));
+        error!("No response received from signing server for certificate fetch");
+        return Err(of_type("Certificate fetch failed: No response from server", ErrorKind::Other));
     }
 
     Ok(None)
@@ -289,32 +302,60 @@ pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), Commo
     if let Some(response) = call_signing_server(SigningServerRequest::SignCsr {
         csr: csr_pem
     }, _device).await.expect("Cannot execute call to signing server") {
-        if let ServerResponse::SignedCertificate { device_id, cert_pem } = response {
-            info!("Got CRT: {}", &cert_pem);
-            save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
-            return Ok(());
-        } else {
-            return Err(of_type(&format!("Cannot perform signing request from {}", _device.device_id), ErrorKind::Other));
+        match response {
+            ServerResponse::SignedCertificate { device_id, cert_pem } => {
+                info!("Got CRT: {}", &cert_pem);
+                save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
+                return Ok(());
+            }
+            ServerResponse::Error { message } => {
+                error!("Server error during certificate signing: {}", message);
+                return Err(of_type(&format!("Certificate signing failed: {}", message), ErrorKind::Other));
+            }
+            _ => {
+                error!("Unexpected response type for certificate signing request");
+                return Err(of_type("Certificate signing failed: Unexpected response type", ErrorKind::Other));
+            }
         }
     }
-    Err(of_type("Cannot fetch server CRT", ErrorKind::BrokenPipe))
+    Err(of_type("Certificate signing failed: No response from server", ErrorKind::BrokenPipe))
 }
 
 pub async fn call_signing_server(req: SigningServerRequest, _device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
-    let mut stream = TcpStream::connect(SocketAddr::new(
-        IpAddr::try_from(Ipv4Addr::from_str(&_device.connect_addr.ip().to_string())?)?, DEFAULT_SIGNING_SERVER_PORT)).await?;
+    let server_addr = SocketAddr::new(
+        IpAddr::try_from(Ipv4Addr::from_str(&_device.connect_addr.ip().to_string())?)?, 
+        DEFAULT_SIGNING_SERVER_PORT);
+    
+    info!("Connecting to signing server at {} for device {}", server_addr, _device.device_id);
+    
+    let mut stream = TcpStream::connect(server_addr).await
+        .map_err(|e| format!("Failed to connect to signing server at {}: {}", server_addr, e))?;
 
-    stream.write_all(serde_json::to_vec(&req)?.as_slice()).await?;
+    let serialized_req = serde_json::to_vec(&req)?;
+    info!("Sending request to signing server: {} bytes", serialized_req.len());
+    
+    stream.write_all(serialized_req.as_slice()).await
+        .map_err(|e| format!("Failed to send request to signing server: {}", e))?;
 
     let mut buffer = Vec::new();
-    let bytes_read_total = stream.read_to_end(&mut buffer).await?;
+    let bytes_read_total = stream.read_to_end(&mut buffer).await
+        .map_err(|e| format!("Failed to read response from signing server: {}", e))?;
+
+    info!("Received {} bytes from signing server", bytes_read_total);
 
     if bytes_read_total == 0 {
+        error!("Signing server sent empty response for device {}", _device.device_id);
         return Ok(None);
     }
+    
     match serde_json::from_slice(&buffer[..bytes_read_total]) {
-        Ok(resp) => Ok(Some(resp)),
+        Ok(resp) => {
+            info!("Successfully parsed server response");
+            Ok(Some(resp))
+        },
         Err(e) => {
+            error!("Failed to deserialize server response for device {}. Raw data: '{}', Error: {}", 
+                   _device.device_id, String::from_utf8_lossy(&buffer), e);
             Err(format!("Failed to deserialize server response. Raw data: '{}', Error: {}",
                         String::from_utf8_lossy(&buffer), e).into())
         }

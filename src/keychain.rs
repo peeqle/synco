@@ -181,9 +181,24 @@ pub mod node {
     pub mod load {
         use std::fs;
         use std::io::Cursor;
+        use log::info;
         use rustls_pki_types::{CertificateDer, PrivateKeyDer};
         use crate::consts::CommonThreadError;
         use crate::utils::get_default_application_dir;
+        
+        pub fn node_cert_exists(device_id: &str) -> bool {
+            let app_data_dir = get_default_application_dir();
+            let client_cert_path = app_data_dir.join(format!("{}_client_cert.pem", device_id));
+            let client_key_path = app_data_dir.join(format!("{}_client_key.pem", device_id));
+
+            let exists = client_cert_path.exists() && client_key_path.exists();
+            info!("Certificate check for {}: cert={}, key={}, both={}", 
+          device_id, 
+          client_cert_path.exists(), 
+          client_key_path.exists(), 
+          exists);
+            exists
+        }
 
         pub fn load_node_cert_pem(device_id: &str) -> Result<String, CommonThreadError> {
             let app_data_dir = get_default_application_dir();
