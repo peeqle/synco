@@ -309,15 +309,16 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
                         info!("Received CSR from device {}. Attempting to load origin CA...", device.device_id);
                         let ca_cert = fs::read_to_string(
                             get_server_cert_storage().join(CA_CERT_FILE_NAME)
-                        ).unwrap_or_default();
-                        
-                        stream.write_all( serde_json::to_vec(
+                        ).expect("Cannot load system CA");
+
+                        stream.write_all(&serde_json::to_vec(
                             &ServerResponse::Certificate {
                                 cert: ca_cert.clone()
                             }
-                        )?.as_slice()).await?;
+                        )?).await?;
                     }
                 }
+                SigningServerRequest::SignCsr { .. } => {}
             }
             Ok(())
         }

@@ -1,18 +1,22 @@
-use crate::consts::{CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
+use crate::broadcast::DiscoveredDevice;
+use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
+use crate::keychain::node::load::load_client_cert_der;
+use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::utils::{get_server_cert_storage, load_cas};
+use crate::utils::{get_server_cert_storage, load_cas, save_server_cert};
 use lazy_static::lazy_static;
-use log::info;
+use log::{error, info};
 use rustls::client::WebPkiServerVerifier;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::ServerName;
+use rustls_pki_types::{CertificateDer, ServerName};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt::format;
 use std::fs::File;
 use std::hash::Hash;
 use std::io;
@@ -27,6 +31,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
+
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
         let (sender, receiver) = mpsc::channel::<ClientActivity>(500);
@@ -35,7 +40,7 @@ lazy_static! {
             bounded_channel: (sender, Mutex::new(receiver)) 
         })
     };
-    
+
     pub static ref SigningRequests: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
@@ -64,19 +69,31 @@ pub struct ClientTcpPeer {
 }
 
 impl TcpClient {
-    pub fn new(server_id: String) -> Result<TcpClient, Box<dyn Error>> {
+    pub fn new(server_id: String) -> Result<TcpClient, CommonThreadError> {
         Ok(TcpClient {
-            server_id,
-            configuration: Arc::new(Self::create_client_config()?),
+            server_id: server_id.clone(),
+            configuration: Arc::new(Self::create_client_config(server_id.clone())?),
             connection: Arc::new(Mutex::new(None)),
         })
     }
 
-    fn create_client_config() -> Result<ClientConfig, Box<dyn Error>> {
+    fn create_client_config(server_id: String) -> Result<ClientConfig, CommonThreadError> {
         let pk = load_private_key_der()?;
         let cert = load_cert_der()?;
 
-        let ca_verification = load_cas(&get_server_cert_storage().join(CA_CERT_FILE_NAME))?;
+        let ca_verification = {
+            let mut root_store = RootCertStore::empty();
+            match load_client_cert_der(&server_id) {
+                Ok(crt) => {
+                    root_store.add(crt).expect(&format!("Cannot load specified CRT for {}", server_id));
+                }
+                Err(_) => {
+                    return Err(of_type("Error loading server CRT to RootStore", ErrorKind::Other))
+                }
+            };
+
+            root_store
+        };
 
         let client_cert_verifier: Arc<WebPkiServerVerifier> = {
             WebPkiServerVerifier::builder(Arc::new(ca_verification))
@@ -95,7 +112,7 @@ impl TcpClient {
         Ok(config)
     }
 }
-pub async fn run(_manager: Arc<ClientManager>) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn run(_manager: Arc<ClientManager>) -> Result<(), CommonThreadError> {
     info!("Starting client...");
     let res = tokio::try_join!(
         tokio::spawn(listen(Arc::clone(&_manager))),
@@ -116,7 +133,11 @@ async fn listen(_manager: Arc<ClientManager>) {
                 if empty {
                     let device_manager = Arc::clone(&DefaultDeviceManager);
                     if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
-                        request_ca(&device.connect_addr).await.expect(&format!("Cannot fetch requested CA from: {}", &device_id));
+                        request_ca(&device).await.expect(&format!("Cannot fetch requested CA from: {}", &device_id));
+                        //request server sign on client's csr
+                        let signed_cert = request_signed_cert(device).await;
+
+
                         open_connection(device_id.clone()).await
                             .expect(&format!("Cannot open connection for: {}", device_id));
                     }
@@ -133,7 +154,7 @@ async fn listen(_manager: Arc<ClientManager>) {
 }
 
 
-async fn open_connection(server_id: String) -> Result<(), Box<dyn Error>> {
+async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     info!("Opening connection to: {}", &server_id);
     let device_manager = Arc::clone(&DefaultDeviceManager);
     if let Some(device) = device_manager.known_devices.read().await.get(&server_id) {
@@ -177,20 +198,50 @@ async fn open_connection(server_id: String) -> Result<(), Box<dyn Error>> {
     Err(Box::new(io::Error::new(ErrorKind::BrokenPipe, format!("Cannot open new Tcp Client for {}", server_id))))
 }
 
-pub async fn request_ca(connection_addr: &SocketAddr) -> Result<Option<ServerResponse>, Box<dyn Error>> {
+pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
+    let response = call_signing_server(SigningServerRequest::FetchCsr, _device).await?;
+
+    if let ServerResponse::Certificate { cert } = response.unwrap() {
+        save_server_cert(_device.device_id.clone(), cert).expect("Cannot save server CA");
+    } else {
+        return Err(of_type("Certificate fetch has failed!", ErrorKind::Other));
+    }
+
+    Ok(None)
+}
+
+pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
+    let (csr_pem, node_keypair) = generate_node_csr(_device.device_id.clone())?;
+
+    if let Some(response) = call_signing_server(SigningServerRequest::SignCsr {
+        csr: csr_pem
+    }, _device).await.expect("Cannot execute call to signing server") {
+        if let ServerResponse::SignedCertificate { device_id, cert_pem } = response {
+            let (node_cert_path, node_key_path) = save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
+        } else {
+            return Err(of_type(&format!("Cannot perform signing request from {}", _device.device_id), ErrorKind::Other));
+        }
+    }
+    Ok(None)
+}
+
+pub async fn call_signing_server(req: SigningServerRequest, _device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     let mut stream = TcpStream::connect(SocketAddr::new(
-        IpAddr::try_from(Ipv4Addr::from_str(&connection_addr.ip().to_string())?)?, DEFAULT_SIGNING_SERVER_PORT)).await?;
+        IpAddr::try_from(Ipv4Addr::from_str(&_device.connect_addr.ip().to_string())?)?, DEFAULT_SIGNING_SERVER_PORT)).await?;
 
-    stream.write_all(serde_json::to_vec(&SigningServerRequest::FetchCsr)?.as_slice()).await?;
+    stream.write_all(serde_json::to_vec(&req)?.as_slice()).await?;
 
-    let mut buffer = vec![0; 4096];
-    let bytes_read = stream.read_buf(&mut buffer).await?;
+    let mut buffer = Vec::new();
+    let bytes_read_total = stream.read_to_end(&mut buffer).await?;
 
-    if bytes_read == 0 {
+    if bytes_read_total == 0 {
         return Ok(None);
     }
-    let response: ServerResponse = serde_json::from_slice(&buffer[..bytes_read])?;
-
-    info!("GOT CA: {:?}", response);
-    Ok(None)
+    match serde_json::from_slice(&buffer[..bytes_read_total]) {
+        Ok(resp) => Ok(Some(resp)),
+        Err(e) => {
+            Err(format!("Failed to deserialize server response. Raw data: '{}', Error: {}",
+                        String::from_utf8_lossy(&buffer), e).into())
+        }
+    }
 }
