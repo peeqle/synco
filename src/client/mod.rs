@@ -140,8 +140,8 @@ async fn listen(_manager: Arc<ClientManager>) {
                                 open_connection(device_id.clone()).await
                                     .expect(&format!("Cannot open connection for: {}", device_id));
                             }
-                            Err(_) => {
-                                error!("Cannot open connection to {} due to crt request error", device_id)
+                            Err(e) => {
+                                error!("Cannot open connection to {} due to crt request error: {}", device_id, e)
                             }
                         }
                     }
@@ -206,7 +206,10 @@ pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerRespo
     let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await?;
 
     if let ServerResponse::Certificate { cert } = response.unwrap() {
-        save_server_cert(_device.device_id.clone(), cert).expect("Cannot save server CA");
+        if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
+            error!("Error while saving server CRT: {}", e);
+            return Err(e)
+        }
     } else {
         return Err(of_type("Certificate fetch has failed!", ErrorKind::Other));
     }
@@ -227,7 +230,7 @@ pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), Commo
             return Err(of_type(&format!("Cannot perform signing request from {}", _device.device_id), ErrorKind::Other));
         }
     }
-    Ok(())
+    Err(of_type("Cannot fetch server CRT", ErrorKind::BrokenPipe))
 }
 
 pub async fn call_signing_server(req: SigningServerRequest, _device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {

@@ -321,7 +321,7 @@ pub mod server {
     use crate::keychain::{generate_cert_keys, load_cert, load_private_key, node_params};
     use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
     use log::info;
-    use rcgen::{date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+    use rcgen::{date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
     use std::error::Error;
     use std::fs;
     use std::fs::File;
@@ -406,7 +406,7 @@ pub mod server {
         let dn_value = node_params
             .distinguished_name
             .get(&DnType::CommonName)
-            .unwrap().clone();
+            .unwrap_or(&DnValue::Utf8String(String::from("synco"))).clone();
 
         let client_cert = node_params
             .signed_by(&csr.public_key, &loaded_crt, &loaded_pk)?;
