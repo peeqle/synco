@@ -1,6 +1,6 @@
 use crate::consts::CommonThreadError;
 use crate::keychain::server::generate_root_ca;
-use crate::keychain::{generate_cert_keys, load_cert_der, load_private_key_der};
+use crate::keychain::{generate_cert_keys, load_leaf_cert_der, load_leaf_private_key_der};
 use crate::machine_utils::get_local_ip;
 use crate::utils::{load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
@@ -45,8 +45,8 @@ impl TcpServer {
     }
 
     pub fn create_server_config() -> Result<ServerConfig, CommonThreadError> {
-        let server_certs = load_cert_der()?;
-        let server_key = load_private_key_der()?;
+        let server_certs = load_leaf_cert_der()?;
+        let server_key = load_leaf_private_key_der()?;
 
         // FIX: Use root CA instead of leaf certificate for client verification
         let (ca_cert_path, _) = generate_root_ca()?;

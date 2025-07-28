@@ -1,6 +1,6 @@
-use crate::consts::{CommonThreadError, DeviceId, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
+use crate::consts::{CommonThreadError, DeviceId, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
 use crate::keychain::server::generate_root_ca;
-use crate::utils::get_default_application_dir;
+use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::{Signature, Signer, SigningKey};
@@ -10,7 +10,7 @@ use rand::rngs::OsRng;
 use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, ErrorKind, Read, Write};
+use std::io::{BufReader, Cursor, ErrorKind, Read, Write};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +35,43 @@ pub(crate) fn load_private_key_der() -> io::Result<PrivateKeyDer<'static>> {
 pub(crate) fn load_cert_der() -> io::Result<CertificateDer<'static>> {
     let certs: Certificate = load_cert(false)?;
     Ok(CertificateDer::from(certs.der().to_vec()))
+}
+
+pub(crate) fn load_leaf_cert_der() -> Result<CertificateDer<'static>, CommonThreadError> {
+    let leaf_cert_path = get_server_cert_storage().join(LEAF_CERT_NAME);
+
+    if !leaf_cert_path.exists() {
+        server::generate_leaf_crt()?;
+    }
+
+    let leaf_cert_pem = fs::read_to_string(&leaf_cert_path)
+        .map_err(|e| format!("Failed to read leaf certificate: {}", e))?;
+
+    let mut cert_reader = Cursor::new(leaf_cert_pem.as_bytes());
+    let leaf_cert_der = rustls_pemfile::certs(&mut cert_reader)
+        .next()
+        .ok_or("No certificate found in leaf PEM file")?
+        .map_err(|e| format!("Failed to parse leaf certificate: {}", e))?;
+
+    Ok(leaf_cert_der)
+}
+
+pub(crate) fn load_leaf_private_key_der() -> Result<PrivateKeyDer<'static>, CommonThreadError> {
+    let leaf_key_path = get_server_cert_storage().join(LEAF_KEYS_NAME);
+
+    if !leaf_key_path.exists() {
+        server::generate_leaf_crt()?;
+    }
+
+    let leaf_key_pem = fs::read_to_string(&leaf_key_path)
+        .map_err(|e| format!("Failed to read leaf private key: {}", e))?;
+
+    let mut key_reader = Cursor::new(leaf_key_pem.as_bytes());
+    let leaf_key_der = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| format!("Failed to parse leaf private key: {}", e))?
+        .ok_or("No private key found in leaf key PEM file")?;
+
+    Ok(leaf_key_der)
 }
 
 pub fn load_cert(called_within: bool) -> io::Result<Certificate> {
