@@ -219,7 +219,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     }
     info!("Client certificate exists for device: {}", server_id);
 
-    let ca_cert_path = get_server_cert_storage().join(&server_id).join(CERT_FILE_NAME);
+    let ca_cert_path = get_server_cert_storage().join(CA_CERT_FILE_NAME);
     info!("Checking CA certificate at path: {}", ca_cert_path.display());
     if !ca_cert_path.exists() {
         error!("CA certificate not found at: {}", ca_cert_path.display());
