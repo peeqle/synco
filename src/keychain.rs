@@ -126,9 +126,9 @@ pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
 pub mod node {
     use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
     use crate::keychain::node_params;
-    use crate::utils::{ get_default_application_dir};
+    use crate::utils::get_default_application_dir;
     use log::info;
-    use rcgen::{ DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
+    use rcgen::{DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
     use std::fs;
     use std::path::PathBuf;
 
@@ -181,17 +181,17 @@ pub mod node {
     }
 
     pub mod load {
-        use std::fs;
-        use std::io::Cursor;
+        use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
+        use crate::utils::{get_default_application_dir, get_server_cert_storage};
         use log::info;
         use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-        use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE};
-        use crate::utils::{get_default_application_dir, get_server_cert_storage};
+        use std::fs;
+        use std::io::Cursor;
 
-        pub fn load_server_signed_cert_der (server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
+        pub fn load_server_signed_cert_der(server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
             let client_keys_storage = get_default_application_dir()
                 .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
-            
+
             if !client_keys_storage.exists() {
                 return Err(format!("Server CA certificate not found at: {}", client_keys_storage.display()).into());
             }
@@ -207,17 +207,18 @@ pub mod node {
 
             Ok(ca_cert_der)
         }
-        
-        pub fn node_cert_exists(device_id: &str) -> bool {
-            let app_data_dir = get_default_application_dir();
-            let client_cert_path = app_data_dir.join(format!("{}_client_cert.pem", device_id));
-            let client_key_path = app_data_dir.join(format!("{}_client_key.pem", device_id));
 
-            let exists = client_cert_path.exists() && client_key_path.exists();
+        pub fn node_cert_exists(server_id: &str) -> bool {
+            let client_keys_storage = get_default_application_dir()
+                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+            let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
+            let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
+
+            let exists = node_cert_path.exists() && node_key_path.exists();
             info!("Certificate check for {}: cert={}, key={}, both={}", 
-          device_id, 
-          client_cert_path.exists(), 
-          client_key_path.exists(), 
+          server_id, 
+          node_key_path.exists(), 
+          node_cert_path.exists(), 
           exists);
             exists
         }
@@ -369,7 +370,7 @@ pub mod server {
         let cert_path = get_server_cert_storage().join(&CA_CERT_FILE_NAME);
 
         if !cert_path.exists() {
-            let (generated_cert, _ ) = generate_signing_ca()?;
+            let (generated_cert, _) = generate_signing_ca()?;
             if !generated_cert.exists() {
                 return Err(of_type("Cannot fetch server CRT", ErrorKind::Other));
             }
