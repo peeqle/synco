@@ -626,7 +626,7 @@ fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
     ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
     ca_params.is_ca = IsCa::NoCa;
     ca_params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
-    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
     Ok(ca_params)
