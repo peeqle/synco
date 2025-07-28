@@ -1,7 +1,7 @@
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::consts::{CommonThreadError, DeviceId, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
-use crate::device_manager::{DefaultDeviceManager, DeviceManagerQuery};
+use crate::device_manager::{add_new_device, DefaultDeviceManager};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
@@ -87,7 +87,6 @@ pub async fn start_listener() -> Result<(), CommonThreadError> {
     let mut buf = vec![0u8; 1024];
 
     let device_manager_arc = Arc::clone(&DefaultDeviceManager);
-    let device_manager_sender = device_manager_arc.get_channel_sender();
 
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
@@ -115,13 +114,8 @@ pub async fn start_listener() -> Result<(), CommonThreadError> {
                         read_guard.clone()
                     };
 
-                    if !known_devices.contains_key(&current_device_id) {
-                        device_manager_sender
-                            .send(DeviceManagerQuery::DiscoveredDevice {
-                                device_id: msg.device_id.clone(),
-                                socket_addr: remote_addr,
-                            })
-                            .await?;
+                    if !known_devices.contains_key(&msg.device_id) {
+                        add_new_device(msg.device_id.clone(), remote_addr).await;
                     }
 
                     //generate challenge
