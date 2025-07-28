@@ -101,7 +101,6 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                     if connecting_device_option.is_some() {
                         let connecting_device = connecting_device_option.unwrap();
 
-
                         let (req_sender, req_receiver) = mpsc::channel::<ServerRequest>(100);
                         let (res_sender, mut res_receiver) = mpsc::channel::<ServerResponse>(100);
 
@@ -347,7 +346,7 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
                 }
                 SigningServerRequest::SignCsr { csr } => {
                     match sign_client_csr(&csr) {
-                        Ok((signed_crt, _)) => {
+                        Ok(signed_crt) => {
                             stream.write_all(&serde_json::to_vec(
                                 &ServerResponse::SignedCertificate {
                                     device_id: current_device_id,
@@ -407,5 +406,3 @@ async fn is_tcp_port_available(port: u16) -> bool {
         Err(_) => false,
     }
 }
-
-mod test {}
