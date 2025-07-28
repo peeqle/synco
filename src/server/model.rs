@@ -1,7 +1,8 @@
-use crate::consts::CA_CERT_FILE_NAME;
+use crate::consts::CommonThreadError;
+use crate::keychain::server::generate_leaf_crt;
 use crate::keychain::{generate_cert_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
-use crate::utils::{get_default_application_dir, load_cas, validate_server_cert_present};
+use crate::utils::{load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WantsServerCert, WebPkiClientVerifier};
 use rustls::{crypto, ConfigBuilder, ServerConfig};
@@ -43,11 +44,13 @@ impl TcpServer {
         })
     }
 
-    pub fn create_server_config() -> io::Result<ServerConfig> {
+    pub fn create_server_config() -> Result<ServerConfig, CommonThreadError> {
         let server_certs = load_cert_der()?;
         let server_key = load_private_key_der()?;
 
-        let server_ca_verification = load_cas(&get_default_application_dir().join(CA_CERT_FILE_NAME))?;
+        let (cert_path, _) = generate_leaf_crt()?;
+
+        let server_ca_verification = load_cas(&cert_path)?;
 
         let client_cert_verifier: Arc<dyn ClientCertVerifier> = {
             WebPkiClientVerifier::builder(Arc::new(server_ca_verification))
@@ -141,7 +144,7 @@ pub enum SigningServerRequest {
     FetchCrt,
     SignCsr {
         csr: String
-    }
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -22,6 +22,9 @@ pub const DEFAULT_TEST_SUBDIR: &str = "test";
 
 pub const DEFAULT_CLIENT_CERT_STORAGE: &str = "client";
 pub const DEFAULT_SERVER_CERT_STORAGE: &str = "server";
+pub const LEAF_CERT_NAME: &str = "leaf.pem";
+pub const LEAF_KEYS_NAME: &str = "leaf.key";
+
 pub const PRIVATE_KEY_FILE_NAME: &str = "key.pem";
 pub const CERT_FILE_NAME: &str = "cert.pem";
 pub const CA_CERT_FILE_NAME: &str = "ca.crt";

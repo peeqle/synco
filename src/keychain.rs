@@ -352,14 +352,15 @@ pub fn generate_certs(
 
 
 pub mod server {
-    use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME};
+    use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME};
 
-    use crate::keychain::{create_ca_params, generate_cert_keys, load_cert, load_private_key};
+    use crate::keychain::server::load::load_leaf_crt;
+    use crate::keychain::{create_leaf_ca_params, create_root_ca_params, generate_cert_keys, load_cert, load_private_key};
     use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
     use log::info;
+    use log::Level::Error;
     use rcgen::IsCa::NoCa;
     use rcgen::{date_time_ymd, BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
-    use std::error::Error;
     use std::fs;
     use std::fs::File;
     use std::io::{ErrorKind, Write};
@@ -378,7 +379,7 @@ pub mod server {
 
         info!("Generating new CA certificate for server operations...");
 
-        let ca_params = create_ca_params()?;
+        let ca_params = create_root_ca_params()?;
         let ca_keypair = KeyPair::generate()?;
         let ca_cert = ca_params.self_signed(&ca_keypair)?;
 
@@ -394,6 +395,40 @@ pub mod server {
         Ok((ca_path, kp_path))
     }
 
+    pub fn generate_leaf_crt() -> Result<(PathBuf, PathBuf), CommonThreadError> {
+        let leaf_cert_path = get_server_cert_storage().join(LEAF_CERT_NAME);
+        let leaf_key_path = get_server_cert_storage().join(LEAF_KEYS_NAME);
+
+        if leaf_cert_path.exists() && leaf_key_path.exists() {
+            return Ok((leaf_cert_path, leaf_key_path));
+        }
+
+        let (ca_cert_path, ca_key_path) = generate_root_ca()?;
+
+        let ca_cert_pem = fs::read_to_string(&ca_cert_path)?;
+        let ca_key_pem = fs::read_to_string(&ca_key_path)?;
+
+        let ca_key_pair = KeyPair::from_pem(&ca_key_pem)?;
+        let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)?;
+        let ca_cert = ca_params.self_signed(&ca_key_pair)?;
+
+        let leaf_keypair = KeyPair::generate()?;
+
+        let leaf_params = create_leaf_ca_params()?;
+
+        let leaf_cert = leaf_params.signed_by(&leaf_keypair, &ca_cert, &ca_key_pair)?;
+
+        let leaf_cert_pem = leaf_cert.pem();
+        let leaf_key_pem = leaf_keypair.serialize_pem();
+
+        fs::write(&leaf_cert_path, leaf_cert_pem.as_bytes())?;
+        fs::write(&leaf_key_path, leaf_key_pem.as_bytes())?;
+
+        info!("Leaf certificate generated and saved at: {}", leaf_cert_path.display());
+        info!("Leaf private key saved at: {}", leaf_key_path.display());
+
+        Ok((leaf_cert_path, leaf_key_path))
+    }
 
     pub fn sign_client_csr(csr_pem: &str) -> Result<Vec<u8>, CommonThreadError> {
         let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem)?;
@@ -430,12 +465,12 @@ pub mod server {
     }
 
     pub mod load {
-        use crate::consts::{CommonThreadError, CERT_FILE_NAME};
+        use crate::consts::{of_type, CommonThreadError, CERT_FILE_NAME, LEAF_CERT_NAME};
         use crate::keychain::server::generate_root_ca;
         use crate::utils::get_server_cert_storage;
         use rustls_pki_types::CertificateDer;
         use std::fs;
-        use std::io::Cursor;
+        use std::io::{Cursor, ErrorKind};
 
         /**
         *Load server signed CA from client's storage for verification
@@ -459,6 +494,26 @@ pub mod server {
                 .map_err(|e| format!("Failed to parse server CA certificate: {}", e))?;
 
             Ok(ca_cert_der)
+        }
+
+        /**
+        PEM
+        */
+        pub fn load_leaf_crt() -> Result<String, CommonThreadError> {
+            let leaf_cert_path = get_server_cert_storage().join(LEAF_CERT_NAME);
+
+            if !leaf_cert_path.exists() {
+                return Err(of_type("Cannot find leaf crt", ErrorKind::Other));
+            }
+
+            match fs::read_to_string(&leaf_cert_path) {
+                Ok(res) => {
+                    Ok(res)
+                }
+                Err(e) => {
+                    Err(of_type("Cannot read leaf crt", ErrorKind::Other))
+                }
+            }
         }
 
         pub fn load_server_crt_pem() -> Result<String, CommonThreadError> {
@@ -530,7 +585,7 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let ca_key_pem = fs::read_to_string(&ca_key_path)?;
     let ca_key_pair = rcgen::KeyPair::from_pem(&ca_key_pem)?;
 
-    let ca_params = create_ca_params()?;
+    let ca_params = create_root_ca_params()?;
     let ca_cert = ca_params.self_signed(&ca_key_pair)?;
 
     let mut params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
@@ -566,14 +621,29 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
 }
 
 
-fn create_ca_params() -> Result<CertificateParams, CommonThreadError> {
+fn create_root_ca_params() -> Result<CertificateParams, CommonThreadError> {
     let mut ca_params = CertificateParams::new(vec![])?;
     ca_params.distinguished_name = DistinguishedName::new();
     ca_params.distinguished_name.push(DnType::CommonName, "synco server".to_string());
     ca_params.distinguished_name.push(DnType::OrganizationName, "synco CA".to_string());
     ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyAgreement];
+    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
+    Ok(ca_params)
+}
+
+fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
+    let mut ca_params = CertificateParams::new(vec![])?;
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params.distinguished_name.push(DnType::CommonName, "synco server".to_string());
+    ca_params.distinguished_name.push(DnType::OrganizationName, "synco CA".to_string());
+    ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
+    ca_params.is_ca = IsCa::NoCa;
+    ca_params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
     Ok(ca_params)
