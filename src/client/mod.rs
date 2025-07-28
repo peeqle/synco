@@ -8,7 +8,7 @@ use crate::keychain::server::save_server_cert;
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::utils::{get_server_cert_storage, load_cas};
+use crate::utils::{get_default_application_dir, get_server_cert_storage, load_cas};
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::client::WebPkiServerVerifier;
@@ -79,6 +79,23 @@ impl TcpClient {
         })
     }
 
+    pub fn new_with_verified_certs(server_id: String) -> Result<TcpClient, CommonThreadError> {
+        if !node_cert_exists(&server_id) {
+            return Err(format!("Client certificate not found for device: {}", server_id).into());
+        }
+
+        let ca_cert_path = get_server_cert_storage().join(&server_id).join(CERT_FILE_NAME);
+        if !ca_cert_path.exists() {
+            return Err(format!("CA certificate not found for server: {}", server_id).into());
+        }
+
+        Ok(TcpClient {
+            server_id: server_id.clone(),
+            configuration: Arc::new(Self::create_client_config(server_id.clone())?),
+            connection: Arc::new(Mutex::new(None)),
+        })
+    }
+
     fn create_client_config(server_id: String) -> Result<ClientConfig, CommonThreadError> {
         info!("Creating client TLS config for server: {}", server_id);
 
@@ -90,10 +107,17 @@ impl TcpClient {
             let mut root_store = RootCertStore::empty();
 
             info!("Loading server CA certificate for: {}", server_id);
-            let ca_cert_der = load_server_signed_ca(&server_id)?;
+            let ca_cert_der = load_server_signed_ca(&server_id)
+                .map_err(|e| {
+                    error!("Failed to load server CA certificate for {}: {}", server_id, e);
+                    format!("Cannot load server CA certificate for {}: {}", server_id, e)
+                })?;
 
             root_store.add(ca_cert_der)
-                .map_err(|e| format!("Cannot add server CA certificate to RootStore: {:?}", e))?;
+                .map_err(|e| {
+                    error!("Cannot add server CA certificate to RootStore for {}: {:?}", server_id, e);
+                    format!("Cannot add server CA certificate to RootStore: {:?}", e)
+                })?;
 
             info!("Successfully loaded server CA certificate for: {}", server_id);
             root_store
@@ -103,7 +127,7 @@ impl TcpClient {
             WebPkiServerVerifier::builder(Arc::new(ca_verification))
                 .build()
                 .map_err(|e| {
-                    error!("Failed to build client verifier: {:?}", e);
+                    error!("Failed to build client verifier for {}: {:?}", server_id, e);
                     io::Error::new(
                         ErrorKind::InvalidInput,
                         format!("Failed to build client verifier: {:?}", e),
@@ -115,7 +139,7 @@ impl TcpClient {
             .with_webpki_verifier(client_cert_verifier)
             .with_client_auth_cert(vec![cert], pk)
             .map_err(|e| {
-                error!("Failed to create client config with client auth: {:?}", e);
+                error!("Failed to create client config with client auth for {}: {:?}", server_id, e);
                 format!("Failed to create client config: {:?}", e)
             })?;
 
@@ -123,6 +147,7 @@ impl TcpClient {
         Ok(config)
     }
 }
+
 pub async fn run(_manager: Arc<ClientManager>) -> Result<(), CommonThreadError> {
     info!("Starting client...");
     let res = tokio::try_join!(
@@ -146,30 +171,69 @@ async fn listen(_manager: Arc<ClientManager>) {
                     if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
                         info!("Starting certificate setup for device: {}", device_id);
 
-                        match request_ca(&device).await {
-                            Ok(_) => {
-                                info!("CA certificate fetched successfully for device: {}", device_id);
+                        let ca_cert_path = get_server_cert_storage().join(&device_id).join(CERT_FILE_NAME);
+                        let need_ca = !ca_cert_path.exists();
+                        let need_client_cert = !node_cert_exists(&device_id);
 
-                                match request_signed_cert(device).await {
-                                    Ok(_) => {
-                                        info!("Client certificate signed successfully for device: {}", device_id);
-
-                                        match open_connection(device_id.clone()).await {
-                                            Ok(_) => {
-                                                info!("Connection opened successfully for device: {}", device_id);
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to open connection for device {}: {}", device_id, e);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to get signed certificate for device {}: {}", device_id, e);
-                                    }
+                        if need_ca {
+                            info!("CA certificate missing for {}, fetching...", device_id);
+                            match request_ca(&device).await {
+                                Ok(_) => {
+                                    info!("CA certificate fetched successfully for device: {}", device_id);
+                                }
+                                Err(e) => {
+                                    error!("Failed to fetch CA certificate for device {}: {}", device_id, e);
+                                    return;
                                 }
                             }
+                        } else {
+                            info!("CA certificate already exists for device: {}", device_id);
+                        }
+
+                        if need_client_cert {
+                            info!("Client certificate missing for {}, requesting signature...", device_id);
+                            match request_signed_cert(device).await {
+                                Ok(_) => {
+                                    info!("Client certificate signed successfully for device: {}", device_id);
+                                }
+                                Err(e) => {
+                                    error!("Failed to get signed certificate for device {}: {}", device_id, e);
+                                    return;
+                                }
+                            }
+                        } else {
+                            info!("Client certificate already exists for device: {}", device_id);
+                        }
+
+                        match open_connection(device_id.clone()).await {
+                            Ok(_) => {
+                                info!("Connection opened successfully for device: {}", device_id);
+                            }
                             Err(e) => {
-                                error!("Failed to fetch CA certificate for device {}: {}", device_id, e);
+                                error!("Failed to open connection for device {}: {}", device_id, e);
+
+                                if e.to_string().contains("UnknownIssuer") || e.to_string().contains("invalid peer certificate") {
+                                    error!("Certificate validation failed, cleaning up certificates for {}", device_id);
+
+                                    let _ = std::fs::remove_dir_all(get_server_cert_storage().join(&device_id));
+                                    let _ = std::fs::remove_dir_all(
+                                        get_default_application_dir()
+                                            .join("client")
+                                            .join(&device_id)
+                                    );
+
+                                    info!("Retrying certificate setup for device: {}", device_id);
+
+                                    if let Err(retry_error) = async {
+                                        request_ca(&device).await?;
+                                        request_signed_cert(&device).await?;
+                                        open_connection(device_id.clone()).await
+                                    }.await {
+                                        error!("Retry failed for device {}: {}", device_id, retry_error);
+                                    } else {
+                                        info!("Retry successful for device: {}", device_id);
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -209,27 +273,6 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
     info!("Device found: {} at {}", device.device_id, device.connect_addr);
 
-    info!("Checking if client certificate exists for device: {}", server_id);
-    if !node_cert_exists(&server_id) {
-        error!("Client certificate not found for device: {}", server_id);
-        return Err(format!(
-            "Client certificate not found for device: {}. Run certificate setup first.",
-            server_id
-        ).into());
-    }
-    info!("Client certificate exists for device: {}", server_id);
-
-    let ca_cert_path = get_server_cert_storage().join(&server_id).join(CERT_FILE_NAME);
-    info!("Checking CA certificate at path: {}", ca_cert_path.display());
-    if !ca_cert_path.exists() {
-        error!("CA certificate not found at: {}", ca_cert_path.display());
-        return Err(format!(
-            "CA certificate not found for server: {}. Run certificate setup first.",
-            server_id
-        ).into());
-    }
-    info!("CA certificate exists at: {}", ca_cert_path.display());
-
     info!("Connecting to: {}", device.connect_addr);
     let stream = TcpStream::connect(&device.connect_addr).await
         .map_err(|e| {
@@ -238,7 +281,12 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         })?;
 
     info!("TCP connection established, creating TLS client configuration for: {}", server_id);
-    let client = TcpClient::new(device.device_id.clone())?;
+    let client = TcpClient::new_with_verified_certs(device.device_id.clone())
+        .map_err(|e| {
+            error!("Failed to create TLS client config for {}: {}", server_id, e);
+            format!("TLS client configuration failed: {}", e)
+        })?;
+    
     let connector = TlsConnector::from(client.configuration.clone());
 
     info!("Establishing TLS connection to: {}", server_id);
@@ -317,29 +365,36 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     Ok(())
 }
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
-    let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await?;
+    info!("Requesting CA certificate from device: {}", _device.device_id);
+
+    let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await
+        .map_err(|e| {
+            error!("Failed to call signing server for CA request from {}: {}", _device.device_id, e);
+            format!("Signing server call failed for {}: {}", _device.device_id, e)
+        })?;
 
     if let Some(server_response) = response {
         match server_response {
             ServerResponse::Certificate { cert } => {
+                info!("Received CA certificate from {}, saving...", _device.device_id);
                 if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
-                    error!("Error while saving server CRT: {}", e);
+                    error!("Error while saving server CRT for {}: {}", _device.device_id, e);
                     return Err(e);
                 }
-                info!("Saved server cert {}", _device.device_id);
+                info!("Successfully saved server cert for {}", _device.device_id);
             }
             ServerResponse::Error { message } => {
-                error!("Server error during certificate fetch: {}", message);
-                return Err(of_type(&format!("Certificate fetch failed: {}", message), ErrorKind::Other));
+                error!("Server error during certificate fetch from {}: {}", _device.device_id, message);
+                return Err(of_type(&format!("Certificate fetch failed from {}: {}", _device.device_id, message), ErrorKind::Other));
             }
             _ => {
-                error!("Unexpected response type for certificate fetch request");
-                return Err(of_type("Certificate fetch failed: Unexpected response type", ErrorKind::Other));
+                error!("Unexpected response type for certificate fetch request from {}", _device.device_id);
+                return Err(of_type(&format!("Certificate fetch failed from {}: Unexpected response type", _device.device_id), ErrorKind::Other));
             }
         }
     } else {
-        error!("No response received from signing server for certificate fetch");
-        return Err(of_type("Certificate fetch failed: No response from server", ErrorKind::Other));
+        error!("No response received from signing server for certificate fetch from {}", _device.device_id);
+        return Err(of_type(&format!("Certificate fetch failed from {}: No response from server", _device.device_id), ErrorKind::Other));
     }
 
     Ok(None)
