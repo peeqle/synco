@@ -1,7 +1,7 @@
 use crate::consts::CA_CERT_FILE_NAME;
 use crate::keychain::{generate_cert_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
-use crate::utils::{get_server_cert_storage, load_cas, validate_server_cert_present};
+use crate::utils::{get_default_application_dir, load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WantsServerCert, WebPkiClientVerifier};
 use rustls::{crypto, ConfigBuilder, ServerConfig};
@@ -47,7 +47,7 @@ impl TcpServer {
         let server_certs = load_cert_der()?;
         let server_key = load_private_key_der()?;
 
-        let server_ca_verification = load_cas(&get_server_cert_storage().join(CA_CERT_FILE_NAME))?;
+        let server_ca_verification = load_cas(&get_default_application_dir().join(CA_CERT_FILE_NAME))?;
 
         let client_cert_verifier: Arc<dyn ClientCertVerifier> = {
             WebPkiClientVerifier::builder(Arc::new(server_ca_verification))
