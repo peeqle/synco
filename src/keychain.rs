@@ -1,4 +1,5 @@
 use crate::consts::{CommonThreadError, DeviceId, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
+use crate::keychain::server::generate_signing_ca;
 use crate::utils::{device_id, get_default_application_dir};
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -6,7 +7,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey};
 use error::Error;
 use lazy_static::lazy_static;
 use rand::rngs::OsRng;
-use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType, PKCS_ED25519};
+use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType, PKCS_ED25519};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Read, Write};
@@ -356,7 +357,7 @@ pub fn node_params(device: Option<String>) -> CertificateParams {
 pub mod server {
     use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME};
 
-    use crate::keychain::{generate_cert_keys, load_cert, load_private_key, node_params};
+    use crate::keychain::{create_ca_params, generate_cert_keys, load_cert, load_private_key, node_params};
     use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
     use log::info;
     use rcgen::{date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
@@ -370,38 +371,19 @@ pub mod server {
         let (ca_path, kp_path) = {
             let server_storage: PathBuf = get_server_cert_storage();
             fs::create_dir_all(&server_storage)?;
-
             (server_storage.join(CA_CERT_FILE_NAME), server_storage.join(CA_KEY_FILE_NAME))
         };
+
         if fs::exists(&ca_path)? && fs::exists(&kp_path)? {
             return Ok((ca_path, kp_path));
         }
 
         info!("Generating new CA certificate for server operations...");
 
-        let mut ca_params = CertificateParams::new(vec![])?;
-        ca_params.distinguished_name = DistinguishedName::new();
-        ca_params
-            .distinguished_name
-            .push(DnType::CommonName, "synco server".to_string());
-
-        ca_params
-            .distinguished_name
-            .push(DnType::OrganizationName, "synco CA".to_string());
-        ca_params
-            .distinguished_name
-            .push(DnType::OrganizationalUnitName, "synco".to_string());
-
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
-
-        ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);;
-        ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
-
+        let ca_params = create_ca_params()?;
         let ca_keypair = KeyPair::generate()?;
-
         let ca_cert = ca_params.self_signed(&ca_keypair)?;
+
         let ca_cert_pem = ca_cert.pem();
         let ca_private_key_pem = ca_keypair.serialize_pem();
 
@@ -413,6 +395,7 @@ pub mod server {
 
         Ok((ca_path, kp_path))
     }
+
 
     pub fn sign_client_csr(csr_pem: &str) -> Result<(Vec<u8>, PathBuf), CommonThreadError> {
         let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem)?;
@@ -570,8 +553,15 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
 }
 
 pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
-    let mut params =
-        CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
+    let (ca_cert_path, ca_key_path) = generate_signing_ca()?;
+
+    let ca_key_pem = fs::read_to_string(&ca_key_path)?;
+    let ca_key_pair = rcgen::KeyPair::from_pem(&ca_key_pem)?;
+
+    let ca_params = create_ca_params()?;
+    let ca_cert = ca_params.self_signed(&ca_key_pair)?;
+
+    let mut params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
     let mut cert_name = DistinguishedName::new();
 
     cert_name.push(DnType::OrganizationName, DeviceId.to_string());
@@ -579,6 +569,7 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
         DnType::CommonName,
         DnValue::PrintableString("synco".try_into().unwrap()),
     );
+    params.distinguished_name = cert_name;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     params.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,
@@ -588,12 +579,11 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
 
     let keypair = generate_keypair()?;
 
-    let cert = params.self_signed(&keypair)?;
+    let cert = params.signed_by(&keypair, &ca_cert, &ca_key_pair)?;
     let private_key_pem = keypair.serialize_pem();
     let cert_pem = cert.pem();
 
     let app_data_dir = get_default_application_dir();
-
     let key_file_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
     let cert_file_path = app_data_dir.join(CERT_FILE_NAME);
 
@@ -601,6 +591,20 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     fs::write(&cert_file_path, cert_pem.as_bytes())?;
 
     Ok(())
+}
+
+
+fn create_ca_params() -> Result<CertificateParams, CommonThreadError> {
+    let mut ca_params = CertificateParams::new(vec![])?;
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params.distinguished_name.push(DnType::CommonName, "synco server".to_string());
+    ca_params.distinguished_name.push(DnType::OrganizationName, "synco CA".to_string());
+    ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+    ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
+    Ok(ca_params)
 }
 
 pub fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
