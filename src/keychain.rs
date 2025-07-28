@@ -353,7 +353,6 @@ pub fn generate_certs(
 }
 
 
-
 pub mod server {
     use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME};
 
@@ -433,7 +432,7 @@ pub mod server {
     }
 
     pub mod load {
-        use crate::consts::{CommonThreadError, CA_CERT_FILE_NAME};
+        use crate::consts::{CommonThreadError, CERT_FILE_NAME};
         use crate::keychain::server::generate_root_ca;
         use crate::utils::get_server_cert_storage;
         use rustls_pki_types::CertificateDer;
@@ -443,8 +442,10 @@ pub mod server {
         /**
         *Load server signed CA from client's storage for verification
         */
-        pub fn load_server_ca(server_id: &String) -> Result<CertificateDer<'static>, CommonThreadError> {
-            let ca_cert_path = get_server_cert_storage().join(CA_CERT_FILE_NAME);
+        pub fn load_server_signed_ca(server_id: &String) -> Result<CertificateDer<'static>, CommonThreadError> {
+            let ca_cert_path = get_server_cert_storage()
+                .join(&server_id)
+                .join(CERT_FILE_NAME);
 
             if !ca_cert_path.exists() {
                 return Err(format!("Server CA certificate not found: {}", ca_cert_path.display()).into());
