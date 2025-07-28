@@ -575,7 +575,7 @@ fn create_root_ca_params() -> Result<CertificateParams, CommonThreadError> {
     ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyAgreement];
-    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth, ExtendedKeyUsagePurpose::ServerAuth];
     ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
     Ok(ca_params)
