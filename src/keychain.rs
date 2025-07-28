@@ -619,7 +619,17 @@ fn create_root_ca_params() -> Result<CertificateParams, CommonThreadError> {
 }
 
 fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
-    let mut ca_params = CertificateParams::new(vec![])?;
+    use crate::machine_utils::get_local_ip;
+
+    let local_ip = get_local_ip().ok_or("Could not determine local IP address")?;
+
+    let san_entries = vec![
+        local_ip.to_string(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
+    let mut ca_params = CertificateParams::new(san_entries)?;
     ca_params.distinguished_name = DistinguishedName::new();
     ca_params.distinguished_name.push(DnType::CommonName, "synco server".to_string());
     ca_params.distinguished_name.push(DnType::OrganizationName, "synco CA".to_string());
