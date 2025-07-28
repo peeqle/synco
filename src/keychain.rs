@@ -38,9 +38,7 @@ pub(crate) fn load_cert_der() -> io::Result<CertificateDer<'static>> {
 }
 
 pub fn load_cert(called_within: bool) -> io::Result<Certificate> {
-    let (crt, _) = generate_root_ca().unwrap();
-
-    let file = OpenOptions::new().read(true).open(crt);
+    let file = OpenOptions::new().read(true).open(get_default_application_dir().join(CERT_FILE_NAME));
     match file {
         Ok(_) => {
             let mut reader = BufReader::new(file?);
