@@ -5,7 +5,6 @@ use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_n
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
-use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
 use crate::utils::{get_default_application_dir, get_server_cert_storage, load_cas};
