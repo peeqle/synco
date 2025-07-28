@@ -3,7 +3,7 @@ use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAM
 use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_server_signed_cert_der, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
-use crate::keychain::server::load::load_server_ca;
+use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
@@ -90,7 +90,7 @@ impl TcpClient {
             let mut root_store = RootCertStore::empty();
 
             info!("Loading server CA certificate for: {}", server_id);
-            let ca_cert_der = load_server_ca(&server_id)?;
+            let ca_cert_der = load_server_signed_ca(&server_id)?;
 
             root_store.add(ca_cert_der)
                 .map_err(|e| format!("Cannot add server CA certificate to RootStore: {:?}", e))?;

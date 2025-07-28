@@ -2,7 +2,9 @@ use crate::challenge::{cleanup, DefaultChallengeManager};
 use crate::client::DefaultClientManager;
 use crate::consts::{CommonThreadError, DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
+use crate::keychain::server::generate_root_ca;
 use crate::machine_utils::get_local_ip;
+use crate::server::tls_utils::clear_client_cert_dir;
 use crate::server::{start_server, DefaultServer};
 use crate::state::InternalState;
 use crate::ui::start_ui;
@@ -13,8 +15,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use crate::keychain::server::generate_signing_ca;
-use crate::server::tls_utils::clear_client_cert_dir;
 
 mod balancer;
 mod broadcast;
@@ -121,6 +121,6 @@ fn initialize() -> IpAddr {
     info!("Listening Port: {}", DEFAULT_LISTENING_PORT);
     info!("Local IP: {}", local_ip);
 
-    generate_signing_ca();
+    generate_root_ca().expect("Cannot generate CA");
     local_ip
 }

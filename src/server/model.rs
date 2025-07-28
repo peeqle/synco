@@ -37,7 +37,6 @@ impl TcpServer {
         let configuration = Self::create_server_config()?;
         Ok(TcpServer {
             local_ip: get_local_ip().unwrap(),
-            loaded_configuration: configuration.clone(),
             current_acceptor: Arc::new(TlsAcceptor::from(Arc::new(configuration))),
             connected_devices: Arc::new(Mutex::new(HashMap::new())),
             bounded_channel: server_channel,
@@ -105,7 +104,6 @@ impl ResolvesServerCert for StaticCertResolver {
 
 pub struct TcpServer {
     pub local_ip: IpAddr,
-    pub loaded_configuration: ServerConfig,
     pub current_acceptor: Arc<TlsAcceptor>,
     //socket_addr to device_id
     pub connected_devices: Arc<Mutex<HashMap<String, ServerTcpPeer>>>,
