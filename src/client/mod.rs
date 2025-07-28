@@ -1,7 +1,7 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_server_signed_cert_der, node_cert_exists};
+use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
@@ -99,8 +99,8 @@ impl TcpClient {
     fn create_client_config(server_id: String) -> Result<ClientConfig, CommonThreadError> {
         info!("Creating client TLS config for server: {}", server_id);
 
-        let pk = load_private_key_der()?;
-        let cert = load_cert_der()?;
+        let pk = load_node_key_der(&server_id)?;
+        let cert = load_node_cert_der(&server_id)?;
         info!("Loaded client private key and certificate");
 
         let ca_verification = {
