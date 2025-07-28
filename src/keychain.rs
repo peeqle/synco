@@ -1,13 +1,13 @@
 use crate::consts::{CommonThreadError, DeviceId, CERT_FILE_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
 use crate::keychain::server::generate_root_ca;
-use crate::utils::{device_id, get_default_application_dir};
+use crate::utils::get_default_application_dir;
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use error::Error;
 use lazy_static::lazy_static;
 use rand::rngs::OsRng;
-use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType, PKCS_ED25519};
+use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Read, Write};
@@ -296,60 +296,6 @@ pub mod node {
         }
     }
 }
-
-pub fn generate_certs(
-    ca_cert_pem: &str,
-    ca_key_pem: &str,
-    node_ip_address: &str,
-) -> Result<(PathBuf, PathBuf), CommonThreadError> {
-    let node_name = device_id().unwrap();
-    println!("Node CRT generation '{}'...", node_name);
-
-    let ca_key_pair = KeyPair::from_pem(&ca_key_pem)?;
-
-    let ca_cert_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)?;
-    let ca_cert = ca_cert_params.self_signed(&ca_key_pair)?;
-
-
-    let server_storage: PathBuf = get_default_application_dir();
-    fs::create_dir_all(&server_storage)?;
-
-    let server_keypair = KeyPair::generate()?;
-
-    let mut server_params = CertificateParams::new(vec![])?;
-    server_params.distinguished_name = rcgen::DistinguishedName::new();
-    server_params
-        .distinguished_name
-        .push(DnType::CommonName, format!("{}-server", node_name));
-    server_params
-        .distinguished_name
-        .push(DnType::OrganizationName, "synco P2P Network".to_string());
-
-    server_params.subject_alt_names = vec![SanType::IpAddress(node_ip_address.parse()?)];
-
-    server_params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
-    server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
-    server_params.is_ca = IsCa::NoCa;
-    server_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
-    server_params.not_after = rcgen::date_time_ymd(2027, 1, 1);
-
-    let server_cert = server_params.signed_by(&server_keypair, &ca_cert, &ca_key_pair)?;
-
-    let server_cert_pem = server_cert.pem();
-    let server_private_key_pem = server_keypair.serialize_pem();
-
-    let server_cert_path = server_storage.join(format!("{}_server_cert.pem", node_name));
-    let server_key_path = server_storage.join(format!("{}_server_key.pem", node_name));
-
-    fs::write(&server_cert_path, server_cert_pem.as_bytes())?;
-    fs::write(&server_key_path, server_private_key_pem.as_bytes())?;
-
-    Ok((server_cert_path, server_key_path))
-}
-
 
 pub mod server {
     use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME};

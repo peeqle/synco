@@ -1,5 +1,5 @@
 use crate::consts::CommonThreadError;
-use crate::keychain::server::generate_leaf_crt;
+use crate::keychain::server::generate_root_ca;
 use crate::keychain::{generate_cert_keys, load_cert_der, load_private_key_der};
 use crate::machine_utils::get_local_ip;
 use crate::utils::{load_cas, validate_server_cert_present};
@@ -48,9 +48,9 @@ impl TcpServer {
         let server_certs = load_cert_der()?;
         let server_key = load_private_key_der()?;
 
-        let (cert_path, _) = generate_leaf_crt()?;
-
-        let server_ca_verification = load_cas(&cert_path)?;
+        // FIX: Use root CA instead of leaf certificate for client verification
+        let (ca_cert_path, _) = generate_root_ca()?;
+        let server_ca_verification = load_cas(&ca_cert_path)?;
 
         let client_cert_verifier: Arc<dyn ClientCertVerifier> = {
             WebPkiClientVerifier::builder(Arc::new(server_ca_verification))
