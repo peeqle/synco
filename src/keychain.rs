@@ -124,7 +124,7 @@ pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
 }
 
 pub mod node {
-    use crate::consts::CommonThreadError;
+    use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
     use crate::keychain::node_params;
     use crate::utils::{ get_default_application_dir};
     use log::info;
@@ -146,10 +146,11 @@ pub mod node {
     }
 
     pub fn save_node_signed_cert(server_id: String, signed_cert: &str, keypair: KeyPair) -> Result<(PathBuf, PathBuf), CommonThreadError> {
-        let app_data_dir = get_default_application_dir();
+        let client_keys_storage = get_default_application_dir()
+            .join(&DEFAULT_CLIENT_CERT_STORAGE).join(&server_id);
 
-        let node_cert_path = app_data_dir.join(format!("{}_client_cert.pem", server_id));
-        let node_key_path = app_data_dir.join(format!("{}_client_key.pem", server_id));
+        let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
+        let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
 
         let node_key_pem = keypair.serialize_pem();
 
@@ -183,20 +184,21 @@ pub mod node {
         use std::io::Cursor;
         use log::info;
         use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-        use crate::consts::{CommonThreadError, CERT_FILE_NAME};
+        use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE};
         use crate::utils::{get_default_application_dir, get_server_cert_storage};
 
-        pub fn load_server_ca_cert_der(server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
-            let ca_cert_path = get_server_cert_storage().join(server_id).join(CERT_FILE_NAME);
-
-            if !ca_cert_path.exists() {
-                return Err(format!("Server CA certificate not found at: {}", ca_cert_path.display()).into());
+        pub fn load_server_signed_cert_der (server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
+            let client_keys_storage = get_default_application_dir()
+                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+            
+            if !client_keys_storage.exists() {
+                return Err(format!("Server CA certificate not found at: {}", client_keys_storage.display()).into());
             }
 
-            let ca_cert_pem = fs::read_to_string(&ca_cert_path)
+            let ca_cert_pem = fs::read_to_string(&client_keys_storage.join(CERT_FILE_NAME))
                 .map_err(|e| format!("Failed to read server CA certificate: {}", e))?;
 
-            let mut cert_reader = std::io::Cursor::new(ca_cert_pem.as_bytes());
+            let mut cert_reader = Cursor::new(ca_cert_pem.as_bytes());
             let ca_cert_der = rustls_pemfile::certs(&mut cert_reader)
                 .next()
                 .ok_or("No certificate found in server CA PEM file")?
