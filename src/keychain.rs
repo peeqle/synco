@@ -405,8 +405,12 @@ pub mod server {
         node_params.not_before = date_time_ymd(1975, 1, 1);
         node_params.not_after = date_time_ymd(4096, 1, 1);
 
-        let loaded_crt = load_cert(false)?;
-        let loaded_pk = load_private_key(false)?;
+        let (ca_cert_path, ca_key_path) = generate_signing_ca()?;
+        let ca_key_pem = fs::read_to_string(&ca_key_path)?;
+        let ca_key_pair = rcgen::KeyPair::from_pem(&ca_key_pem)?;
+
+        let ca_params = create_ca_params()?;
+        let ca_cert = ca_params.self_signed(&ca_key_pair)?;
 
         let dn_value = node_params
             .distinguished_name
@@ -414,7 +418,7 @@ pub mod server {
             .unwrap_or(&DnValue::Utf8String(String::from("synco"))).clone();
 
         let client_cert = node_params
-            .signed_by(&csr.public_key, &loaded_crt, &loaded_pk)?;
+            .signed_by(&csr.public_key, &ca_cert, &ca_key_pair)?;
 
         let client_cert_pem = client_cert.pem();
 
@@ -433,8 +437,8 @@ pub mod server {
 
         fs::write(&node_cert_path, client_cert_pem.as_bytes())?;
 
-        println!(
-            "Client certificate saved at: {}",
+        info!(
+            "Client certificate signed by CA and saved at: {}",
             node_cert_path.display()
         );
 
@@ -454,7 +458,7 @@ pub mod server {
     }
 
     pub mod load {
-        use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME};
+        use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME};
         use crate::keychain::server::generate_signing_ca;
         use crate::utils::get_server_cert_storage;
         use rustls_pki_types::CertificateDer;
@@ -465,12 +469,13 @@ pub mod server {
         *Load server signed CA from client's storage for verification
         */
         pub fn load_server_ca(server_id: &String) -> Result<CertificateDer<'static>, CommonThreadError> {
-            let dir = get_server_cert_storage().join(server_id);
-            if !fs::exists(&dir)? {
-                return Err(format!("Server certificate not found: {}", dir.display()).into());
+            let ca_cert_path = get_server_cert_storage().join(CA_CERT_FILE_NAME);
+
+            if !ca_cert_path.exists() {
+                return Err(format!("Server CA certificate not found: {}", ca_cert_path.display()).into());
             }
 
-            let ca_cert_pem = fs::read_to_string(&dir.join(CERT_FILE_NAME))
+            let ca_cert_pem = fs::read_to_string(&ca_cert_path)
                 .map_err(|e| format!("Failed to read server CA certificate: {}", e))?;
 
             let mut cert_reader = Cursor::new(ca_cert_pem.as_bytes());
