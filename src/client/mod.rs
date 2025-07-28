@@ -3,10 +3,12 @@ use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAM
 use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_server_signed_cert_der, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
+use crate::keychain::server::load::load_server_ca;
+use crate::keychain::server::save_server_cert;
 use crate::keychain::{load_cert_der, load_private_key_der};
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::utils::{get_server_cert_storage, load_cas, save_server_cert};
+use crate::utils::{get_server_cert_storage, load_cas};
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::client::WebPkiServerVerifier;
@@ -88,7 +90,7 @@ impl TcpClient {
             let mut root_store = RootCertStore::empty();
 
             info!("Loading server CA certificate for: {}", server_id);
-            let ca_cert_der = load_server_signed_cert_der(&server_id)?;
+            let ca_cert_der = load_server_ca(&server_id)?;
 
             root_store.add(ca_cert_der)
                 .map_err(|e| format!("Cannot add server CA certificate to RootStore: {:?}", e))?;
@@ -324,6 +326,7 @@ pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerRespo
                     error!("Error while saving server CRT: {}", e);
                     return Err(e);
                 }
+                info!("Saved server cert {}", _device.device_id);
             }
             ServerResponse::Error { message } => {
                 error!("Server error during certificate fetch: {}", message);

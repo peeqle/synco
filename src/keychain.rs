@@ -216,9 +216,9 @@ pub mod node {
 
             let exists = node_cert_path.exists() && node_key_path.exists();
             info!("Certificate check for {}: cert={}, key={}, both={}", 
-          server_id, 
-          node_key_path.exists(), 
-          node_cert_path.exists(), 
+          server_id,
+          node_key_path.exists(),
+          node_cert_path.exists(),
           exists);
             exists
         }
@@ -354,7 +354,7 @@ pub fn node_params(device: Option<String>) -> CertificateParams {
 }
 
 pub mod server {
-    use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME};
+    use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME};
 
     use crate::keychain::{generate_cert_keys, load_cert, load_private_key, node_params};
     use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
@@ -363,24 +363,8 @@ pub mod server {
     use std::error::Error;
     use std::fs;
     use std::fs::File;
-    use std::io::ErrorKind;
+    use std::io::{ErrorKind, Write};
     use std::path::PathBuf;
-
-    pub fn load_server_crt_pem() -> Result<String, CommonThreadError> {
-        let cert_path = get_server_cert_storage().join(&CA_CERT_FILE_NAME);
-
-        if !cert_path.exists() {
-            let (generated_cert, _) = generate_signing_ca()?;
-            if !generated_cert.exists() {
-                return Err(of_type("Cannot fetch server CRT", ErrorKind::Other));
-            }
-        }
-
-        let crt = fs::read_to_string(&cert_path)
-            .map_err(|e| format!("Failed to read CRT: {}", e))?;
-
-        Ok(crt)
-    }
 
     pub fn generate_signing_ca() -> Result<(PathBuf, PathBuf), CommonThreadError> {
         let (ca_path, kp_path) = {
@@ -472,6 +456,64 @@ pub mod server {
         );
 
         Ok((client_cert_pem.as_bytes().to_vec(), node_cert_path))
+    }
+
+    pub fn save_server_cert(device_id: String, cert: String) -> Result<(), CommonThreadError> {
+        let dir = get_server_cert_storage().join(&device_id);
+        fs::create_dir_all(&dir)?;
+
+        let file_path = dir.join(CERT_FILE_NAME);
+        let mut file = File::create(&file_path)?;
+
+        file.write_all(cert.as_bytes())?;
+
+        Ok(())
+    }
+
+    pub mod load {
+        use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME};
+        use crate::keychain::server::generate_signing_ca;
+        use crate::utils::get_server_cert_storage;
+        use rustls_pki_types::CertificateDer;
+        use std::fs;
+        use std::io::{Cursor, ErrorKind};
+
+        /**
+        *Load server signed CA from client's storage for verification
+        */
+        pub fn load_server_ca(server_id: &String) -> Result<CertificateDer<'static>, CommonThreadError> {
+            let dir = get_server_cert_storage().join(server_id);
+            if !fs::exists(&dir)? {
+                return Err(format!("Server certificate not found: {}", dir.display()).into());
+            }
+
+            let ca_cert_pem = fs::read_to_string(&dir.join(CERT_FILE_NAME))
+                .map_err(|e| format!("Failed to read server CA certificate: {}", e))?;
+
+            let mut cert_reader = Cursor::new(ca_cert_pem.as_bytes());
+            let ca_cert_der = rustls_pemfile::certs(&mut cert_reader)
+                .next()
+                .ok_or("No certificate found in server CA PEM file")?
+                .map_err(|e| format!("Failed to parse server CA certificate: {}", e))?;
+
+            Ok(ca_cert_der)
+        }
+
+        pub fn load_server_crt_pem() -> Result<String, CommonThreadError> {
+            let cert_path = get_server_cert_storage().join(&CA_CERT_FILE_NAME);
+
+            if !cert_path.exists() {
+                let (generated_cert, _) = generate_signing_ca()?;
+                if !generated_cert.exists() {
+                    return Err(of_type("Cannot fetch server CRT", ErrorKind::Other));
+                }
+            }
+
+            let crt = fs::read_to_string(&cert_path)
+                .map_err(|e| format!("Failed to read CRT: {}", e))?;
+
+            Ok(crt)
+        }
     }
 }
 

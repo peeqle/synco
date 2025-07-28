@@ -4,7 +4,8 @@ use crate::challenge::{
 };
 use crate::consts::{of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::keychain::server::{load_server_crt_pem, sign_client_csr};
+use crate::keychain::server::load::load_server_crt_pem;
+use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
 use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
@@ -18,9 +19,9 @@ use std::fmt::format;
 use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{fs, io};
 use std::thread::sleep;
 use std::time::Duration;
+use std::{fs, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -128,8 +129,8 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
 
                             let connection = device_connection.connection.clone();
                             tokio::spawn(async move {
-                                let mut  mtx = connection.lock().await;
-                                let(c, m) = mtx.get_mut();
+                                let mut mtx = connection.lock().await;
+                                let (c, m) = mtx.get_mut();
                                 m.writer().write_all(b"Ping").unwrap();
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                             });

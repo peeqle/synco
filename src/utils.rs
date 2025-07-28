@@ -1,10 +1,10 @@
-use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
+use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use crate::keychain::DEVICE_SIGNING_KEY;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use base32::Alphabet;
-use log::info;
+use der::Writer;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
@@ -13,8 +13,6 @@ use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
-use der::Writer;
-use rustls_pki_types::CertificateDer;
 
 pub mod control {
     use std::error::Error;
@@ -113,18 +111,6 @@ pub fn get_server_cert_storage() -> PathBuf {
     fs::create_dir_all(&dir.join(DEFAULT_SERVER_CERT_STORAGE)).unwrap();
 
     dir.join(DEFAULT_SERVER_CERT_STORAGE)
-}
-
-pub fn save_server_cert(device_id: String, cert: String) -> Result<(), CommonThreadError> {
-    let dir = get_server_cert_storage().join(&device_id);
-    fs::create_dir_all(&dir)?;
-
-    let file_path = dir.join(CERT_FILE_NAME);
-    let mut file = File::create(&file_path)?;
-
-    file.write_all(cert.as_bytes())?;
-
-    Ok(())
 }
 
 pub fn validate_server_cert_present() -> bool {
