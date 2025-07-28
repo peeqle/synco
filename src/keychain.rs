@@ -148,6 +148,7 @@ pub mod node {
     pub fn save_node_signed_cert(server_id: String, signed_cert: &str, keypair: KeyPair) -> Result<(PathBuf, PathBuf), CommonThreadError> {
         let client_keys_storage = get_default_application_dir()
             .join(&DEFAULT_CLIENT_CERT_STORAGE).join(&server_id);
+        fs::create_dir_all(&client_keys_storage)?;
 
         let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
         let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
