@@ -281,29 +281,31 @@ pub mod node {
             exists
         }
 
-        pub fn load_node_cert_pem(device_id: &str) -> Result<String, CommonThreadError> {
-            let app_data_dir = get_default_application_dir();
-            let client_cert_path = app_data_dir.join(format!("{}_client_cert.pem", device_id));
+        pub fn load_node_cert_pem(server_id: &str) -> Result<String, CommonThreadError> {
+            let client_keys_storage = get_default_application_dir()
+                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+            let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
 
-            if !client_cert_path.exists() {
-                return Err(format!("Client certificate not found: {}", client_cert_path.display()).into());
+            if !node_cert_path.exists() {
+                return Err(format!("Client certificate not found: {}", node_cert_path.display()).into());
             }
 
-            let cert_pem = fs::read_to_string(&client_cert_path)
+            let cert_pem = fs::read_to_string(&node_cert_path)
                 .map_err(|e| format!("Failed to read client certificate: {}", e))?;
 
             Ok(cert_pem)
         }
 
-        pub fn load_node_key_pem(device_id: &str) -> Result<String, CommonThreadError> {
-            let app_data_dir = get_default_application_dir();
-            let client_key_path = app_data_dir.join(format!("{}_client_key.pem", device_id));
+        pub fn load_node_key_pem(server_id: &str) -> Result<String, CommonThreadError> {
+            let client_keys_storage = get_default_application_dir()
+                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+            let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
 
-            if !client_key_path.exists() {
-                return Err(format!("Client private key not found: {}", client_key_path.display()).into());
+            if !node_key_path.exists() {
+                return Err(format!("Client private key not found: {}", node_key_path.display()).into());
             }
 
-            let key_pem = fs::read_to_string(&client_key_path)
+            let key_pem = fs::read_to_string(&node_key_path)
                 .map_err(|e| format!("Failed to read client private key: {}", e))?;
 
             Ok(key_pem)
