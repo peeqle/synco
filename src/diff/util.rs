@@ -1,3 +1,4 @@
+use crate::diff::consts;
 use blake3::{Hash, Hasher};
 use std::error::Error;
 use std::fs::File;
@@ -5,6 +6,13 @@ use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::str::from_utf8;
 use std::{fs, io};
+
+pub fn verify_file_size<T: AsRef<Path>>(file_path: T) -> bool {
+    if let Ok(meta) = fs::metadata(file_path) {
+        return meta.len() <= consts::MAX_FILE_SIZE_BYTES
+    }
+    false
+}
 
 pub fn is_file_binary_utf8<T: AsRef<Path>>(path: T) -> Result<bool, Box<dyn Error>> {
     let mut file = File::open(&path)?;

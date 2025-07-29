@@ -1,22 +1,29 @@
-//todo implement lcs for files
-//create file holder structure
-
 mod util;
+mod consts;
 
 use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
-use crate::diff::util::{blake_digest, verify_permissions};
-use crate::utils::device_id;
+use crate::diff::consts::MAX_FILE_SIZE_BYTES;
+use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
+use crate::diff::SnapshotAction::Update;
+use crate::utils::get_default_application_dir;
+use crate::utils::DirType::Cache;
 use blake3::Hash;
 use lazy_static::lazy_static;
+use mockall::Any;
+use notify::event::{DataChange, ModifyKind, RemoveKind};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::{copy, remove_file};
 use std::io::{BufRead, ErrorKind, Read};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use uuid::Uuid;
 use FileManagerOperations::*;
@@ -24,23 +31,24 @@ use FileManagerOperations::*;
 lazy_static! {
     pub static ref ProcessedFiles: Arc<Mutex<HashMap<String, FileEntity>>> =
         Arc::new(Mutex::new(HashMap::new()));
+
+    pub static ref AwaitingFiles: Arc<Mutex<HashMap<String, FileEntity>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct FileEntity {
     id: String,
+    path: PathBuf,
+    snapshot_path: Option<PathBuf>,
     prev_hash: Option<Hash>,
     current_hash: Hash,
+    is_in_sync: Arc<AtomicBool>,
     //devices in-sync
     main_node: String,
     synced_with: Vec<String>,
     //
     last_update: Option<Instant>,
-}
-
-pub struct FileManager {
-    attached_files: Arc<Mutex<Vec<FileEntity>>>,
-    rx: FileReceiverRx,
+    notify: Arc<Notify>,
 }
 
 pub enum FileManagerOperations {
@@ -59,73 +67,28 @@ pub enum FileManagerOperations {
     },
 }
 
-pub type FileReceiverRx = Receiver<FileManagerOperations>;
-impl FileManager {
-    pub fn new(file_reader_rx: FileReceiverRx) -> Self {
-        FileManager {
-            attached_files: Arc::new(Mutex::new(vec![])),
-            rx: file_reader_rx,
-        }
-    }
-    pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        let handle = |query: &FileManagerOperations| -> Result<(), Box<dyn Error>> {
-            match query {
-                InsertRequired { file_entity } => {
-                    Ok(())
-                }
-                InsertSystem { path } => {
-                    let err = verify_permissions(path.as_ref(), false).err();
-                    if let Some(file_error) = err {
-                        match file_error.kind() {
-                            ErrorKind::NotFound => {
-                                return Err(of_type(&format!("Cannot find specified file at: {}", path.to_str().unwrap()), ErrorKind::Other));
-                            }
-                            _ => {}
-                        }
-                    }
+pub async fn add_file_request(device_id: String,
+                              requesting_system_id: String,
+                              requesting_system_path: String,
+                              requesting_system_hash: String) -> Result<(), CommonThreadError> {
+    let file_manager = AwaitingFiles.clone();
+    let mtx = file_manager.lock().await;
 
-                    let mut lck = self.attached_files.try_lock()?;
+    mtx.iter().find(|(_, file)| file.current_hash.to_string().eq(&requesting_system_hash))
+        .get_or_insert((&requesting_system_hash, &FileEntity {
+            id: requesting_system_id,
+            path: PathBuf::from(&requesting_system_path),
+            snapshot_path: None,
+            prev_hash: None,
+            current_hash: Hash::from_str(&requesting_system_hash)?,
+            is_in_sync: Arc::new(AtomicBool::new(false)),
+            main_node: device_id,
+            synced_with: vec![],
+            last_update: None,
+            notify: Arc::new(Notify::new()),
+        }));
 
-
-                    let hash = blake_digest(&path)?;
-                    if let Some(current_device_id) = device_id() {
-                        lck.push(
-                            FileEntity {
-                                id: Uuid::new_v4().to_string(),
-                                prev_hash: None,
-                                current_hash: hash,
-                                main_node: current_device_id,
-                                synced_with: vec![],
-                                last_update: Some(Instant::now()),
-                            });
-
-                        println!("Added new file to the space: {}", path.to_str().unwrap());
-                    }
-                    Ok(())
-                }
-                Delete { id } => {
-                    let mut lck = self.attached_files.try_lock()?;
-                    lck.retain(|x| !x.id.eq(id));
-                    Ok(())
-                }
-                Update { id, file_entity_mergeable } => {
-                    let mut lck = self.attached_files.try_lock()?;
-                    if let Some(ent) = lck.iter()
-                        .find(|x| x.id.eq(id)).as_mut() {}
-                    Ok(())
-                }
-            }
-        };
-        loop {
-            tokio::select! {
-                Some(query) = self.rx.recv()  => {
-
-                },
-                else => break
-            }
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
@@ -133,27 +96,114 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
     if permissions.is_err() {
         return Err(permissions.err().unwrap());
     }
-    let mut current_state = ProcessedFiles.lock().await;
+    if !verify_file_size(&path) {
+        return Err(of_type(&format!("File is too large, max is {}", MAX_FILE_SIZE_BYTES), ErrorKind::Other));
+    }
+
+    let file_manager = ProcessedFiles.clone();
+    let mut current_state = file_manager.lock().await;
 
     let blake_filepath_hash = blake_digest(&path)?;
-    match current_state.entry(blake_filepath_hash.to_string()) {
+    match current_state.entry(blake3::hash(path.as_ref().as_os_str().as_bytes()).to_string()) {
         Entry::Occupied(entry) => {
             println!("Recalculating hashes for {}", path.as_ref().to_str().unwrap());
         }
         Entry::Vacant(_) => {
             current_state.insert(blake_filepath_hash.to_string(), FileEntity {
                 id: Uuid::new_v4().to_string(),
+                path: PathBuf::from(path.as_ref()),
+                is_in_sync: Arc::new(AtomicBool::new(false)),
+                snapshot_path: None,
                 prev_hash: None,
                 current_hash: blake_filepath_hash,
                 main_node: DeviceId.clone(),
                 synced_with: vec![],
                 last_update: None,
+                notify: Arc::new(Notify::new()),
             });
         }
     }
     Ok(())
 }
 
+pub fn snapshot(file: &mut FileEntity, action: SnapshotAction) -> Result<(), CommonThreadError> {
+    let mut clone = || -> Result<(), CommonThreadError> {
+        if let Some(file_name) = file.path.file_name() {
+            let dir = get_default_application_dir(Cache);
+
+            copy(&file.path, dir.join(&file_name))?;
+            file.snapshot_path = Some(dir.join(&file_name));
+        }
+        Ok(())
+    };
+    match action {
+        SnapshotAction::Create => {
+            clone()?;
+        }
+        SnapshotAction::Update => {
+            clone()?;
+        }
+        SnapshotAction::Remove => {
+            if let Some(file_path) = &file.snapshot_path {
+                remove_file(file_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub enum SnapshotAction {
+    Create,
+    Update,
+    Remove,
+}
+
+pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
+    let file_manager = ProcessedFiles.clone();
+    let notify_future = Arc::clone(&file.notify);
+
+    let path_arc = Arc::new(path.as_ref().to_path_buf());
+    tokio::spawn(async move {
+        loop {
+            notify_future.notified().await;
+
+            let mut mtx = file_manager.lock().await;
+            let path_key = blake3::hash(path_arc.as_os_str().as_bytes()).to_string();
+
+            if let Some(entry) = mtx.get_mut(&path_key) {
+                //send changes to node
+
+                snapshot(entry, Update)
+                    .expect("Cannot create file snapshot");
+            }
+        }
+    });
+}
+
+pub async fn check_file_change(file: &FileEntity) -> RecommendedWatcher {
+    let notify_future = Arc::clone(&file.notify);
+    let file_path = file.path.clone();
+    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        match res {
+            Ok(event) => {
+                if event.paths.contains(&file_path) && (matches!(event.kind, notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))) ||
+                    matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any))) {
+                    notify_future.notify_waiters();
+                }
+            }
+            Err(e) => eprintln!("{:?}", e),
+        }
+    }).expect("Cannot build watcher");
+
+    watcher.watch(&file.path.clone(), RecursiveMode::NonRecursive).expect("Cannot watch");
+
+    watcher
+}
+
+
+/**
+For now consider that a bullshit, cause idk how to efficiently compare two+ distinct, fairly similar, but completely different files in the network
+*/
 ///Called if only hashes on both sides are different
 /// 1. Read line from reader while reader line [i] == internal file line [i]
 /// 2. If reader line [i] != internal file line [i] - set flag
@@ -184,13 +234,14 @@ mod diff_test {
     use crate::consts::DEFAULT_TEST_SUBDIR;
     use crate::diff::util::blake_digest;
     use crate::utils::get_default_application_dir;
+    use crate::utils::DirType::Action;
     use std::fs;
     use std::fs::File;
     use std::io::{BufWriter, Write};
 
     #[test]
     fn calculate_hash() {
-        let dir_path = get_default_application_dir().join(&DEFAULT_TEST_SUBDIR);
+        let dir_path = get_default_application_dir(Action).join(&DEFAULT_TEST_SUBDIR);
         let _ = fs::remove_dir_all(&dir_path);
 
         fs::create_dir_all(dir_path.as_path()).unwrap();

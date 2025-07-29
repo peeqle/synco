@@ -7,6 +7,7 @@ use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
+use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage, load_cas};
 use lazy_static::lazy_static;
 use log::{error, info};
@@ -216,7 +217,7 @@ async fn listen(_manager: Arc<ClientManager>) {
 
                                     let _ = std::fs::remove_dir_all(get_server_cert_storage().join(&device_id));
                                     let _ = std::fs::remove_dir_all(
-                                        get_default_application_dir()
+                                        get_default_application_dir(Action)
                                             .join("client")
                                             .join(&device_id)
                                     );

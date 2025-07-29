@@ -1,5 +1,6 @@
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use crate::keychain::DEVICE_SIGNING_KEY;
+use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
@@ -36,9 +37,20 @@ pub fn device_id() -> Option<String> {
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
-pub fn get_default_application_dir() -> PathBuf {
-    let mut app_data_dir = dirs::data_dir()
-        .ok_or_else(|| {
+pub enum DirType {
+    Action,
+    Cache,
+}
+
+pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
+    let mut app_data_dir = match dir_type {
+        DirType::Action => {
+            dirs::data_dir()
+        }
+        DirType::Cache => {
+            dirs::cache_dir()
+        }
+    }.ok_or_else(|| {
             io::Error::new(
                 ErrorKind::Unsupported,
                 "Could not determine application data directory for this OS.",
@@ -78,14 +90,14 @@ pub(crate) fn load_cas<T: AsRef<Path>>(path: T) -> io::Result<RootCertStore> {
 Generates client storage on SERVER side for storing signed client PEM
 */
 pub fn get_client_cert_storage() -> PathBuf {
-    let dir = get_default_application_dir();
+    let dir = get_default_application_dir(Action);
     fs::create_dir_all(&dir.join(DEFAULT_CLIENT_CERT_STORAGE)).unwrap();
 
     dir.join(DEFAULT_CLIENT_CERT_STORAGE)
 }
 
 pub fn get_server_cert_storage() -> PathBuf {
-    let dir = get_default_application_dir();
+    let dir = get_default_application_dir(Action);
     fs::create_dir_all(&dir.join(DEFAULT_SERVER_CERT_STORAGE)).unwrap();
 
     dir.join(DEFAULT_SERVER_CERT_STORAGE)

@@ -117,7 +117,6 @@ pub struct ServerTcpPeer {
     pub device_id: String,
     pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
-    pub writer_request: Sender<ServerRequest>,
     pub writer_response: Sender<ServerResponse>,
 }
 
@@ -137,6 +136,11 @@ pub enum ServerRequest {
     },
     AcceptConnection(String),
     RejectConnection(String),
+    FileOperation {
+        id: String,
+        path: String,
+        hash: String,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

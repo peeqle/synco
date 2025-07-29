@@ -4,6 +4,7 @@ use crate::challenge::{
 };
 use crate::consts::{of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
+use crate::diff::{add_file_request, attach};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
@@ -111,18 +112,22 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                                     device_id: connecting_device.device_id.clone(),
                                     connection: Arc::new(Mutex::new(tls_stream)),
                                     connection_status: Unknown,
-                                    writer_request: req_sender,
                                     writer_response: res_sender,
                                 });
                             if device_connection.connection_status == Unknown {
-                                let server_clone = server_arc.clone();
+                                let connection = device_connection.connection.clone();
                                 tokio::spawn(async move {
-                                    info!("Peer connection established");
-                                    handle_client_actions(
-                                        server_clone,
-                                        connecting_device.device_id.clone(),
-                                        req_receiver,
-                                    ).await.expect("Pipe broken: handle_client_actions");
+                                    let mut buffer = Vec::new();
+                                    loop {
+                                        let mut locked_connection = connection.lock().await;
+                                        match locked_connection.read_to_end(&mut buffer).await {
+                                            Ok(_) => {
+                                                handle_server_request(device_connection.device_id.clone(), buffer.clone()).await;
+                                                AsyncWriteExt::flush(&mut buffer).await.expect("Cannot flush");
+                                            }
+                                            Err(_) => {}
+                                        }
+                                    };
                                 });
                             }
 
@@ -163,39 +168,37 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
     }
 }
 
-
-async fn handle_client_actions(
-    server: Arc<TcpServer>,
-    device_id: String,
-    mut server_receiver: Receiver<ServerRequest>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    info!("Started client handler for device: {}", device_id);
-
-    while let Some(message) = server_receiver.recv().await {
-        info!("Received message from {}: {:?}", device_id, message);
-        match message {
-            ServerRequest::InitialRequest { .. } => {}
-            ServerRequest::ChallengeRequest { .. } => {}
-            ServerRequest::ChallengeResponse { .. } => {
-                if let Err(e) = DefaultChallengeManager
-                    .get_sender()
-                    .send(ChallengeEvent::ChallengeVerification {
-                        connection_response: message,
-                    })
-                    .await
-                {
-                    error!("Failed to send challenge verification: {}", e);
+async fn handle_server_request(sender_id: String, buffer: Vec<u8>) {
+    match serde_json::from_slice::<ServerRequest>(&buffer) {
+        Ok(req) => {
+            match req {
+                ServerRequest::InitialRequest { .. } => {}
+                ServerRequest::ChallengeRequest { .. } => {}
+                ServerRequest::ChallengeResponse { .. } => {
+                    if let Err(e) = DefaultChallengeManager
+                        .get_sender()
+                        .send(ChallengeEvent::ChallengeVerification {
+                            connection_response: req,
+                        })
+                        .await
+                    {
+                        error!("Failed to send challenge verification: {}", e);
+                    }
+                }
+                ServerRequest::AcceptConnection(_) => {}
+                ServerRequest::RejectConnection(_) => {}
+                ServerRequest::FileOperation { id, path, hash } => {
+                    match add_file_request(sender_id, id, path, hash).await {
+                        Ok(_) => {}
+                        Err(err) => {
+                            error!("{:?}", err);
+                        }
+                    };
                 }
             }
-            ServerRequest::AcceptConnection(_) => {}
-            ServerRequest::RejectConnection(_) => {
-                break;
-            }
         }
+        Err(_) => {}
     }
-    info!("Client handler for device {} has ended", device_id);
-    server.connected_devices.lock().await.remove(&device_id);
-    Ok(())
 }
 
 async fn listen_actions(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -378,22 +381,6 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
         }
     }
 }
-//
-// async fn handle_device_csr_signing(csr_pem: String) -> Result<Vec<u8>, CommonThreadError> {
-//     let sign_result = spawn_blocking(move || {
-//         sign_client_csr(&csr_pem)
-//     }).await;
-//
-//     match sign_result? {
-//         Ok((signed_cert, path)) => {
-//             Ok(signed_cert)
-//         }
-//         Err(e) => {
-//             error!("Failed to sign CSR");
-//             Err(e)
-//         }
-//     }
-// }
 
 async fn is_tcp_port_available(port: u16) -> bool {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
