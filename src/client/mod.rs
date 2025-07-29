@@ -334,6 +334,10 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             };
 
             let received_data = String::from_utf8_lossy(&buffer[..bytes_read]);
+            //todo handle actions and make connection to the diff mod
+            // add support for diff metadata and initial file meta handshake
+            //async channel for actions?
+            //static configuration?
             info!("Received {} bytes from {}: {}", bytes_read, reader_server_id, received_data);
         }
 
@@ -363,6 +367,8 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     info!("Connection setup completed for: {}", server_id);
     Ok(())
 }
+
+pub async fn handle_actions() {}
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     info!("Requesting CA certificate from device: {}", _device.device_id);
 

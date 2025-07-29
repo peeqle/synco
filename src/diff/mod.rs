@@ -3,21 +3,22 @@
 
 mod util;
 
-use crate::consts::{CommonThreadError, BUFFER_SIZE};
-use crate::diff::util::is_file_binary_utf8;
-use crate::utils::{device_id, verify_permissions};
-use blake3::{Hash, Hasher};
+use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
+use crate::diff::util::{blake_digest, verify_permissions};
+use crate::utils::device_id;
+use blake3::Hash;
 use lazy_static::lazy_static;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::File;
-use std::io::{BufRead, BufReader, ErrorKind, Read};
+use std::io::{BufRead, ErrorKind, Read};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+use uuid::Uuid;
 use FileManagerOperations::*;
 
 lazy_static! {
@@ -27,14 +28,14 @@ lazy_static! {
 
 #[derive(Clone, PartialEq)]
 pub struct FileEntity {
-    id: u64,
+    id: String,
     prev_hash: Option<Hash>,
     current_hash: Hash,
     //devices in-sync
     main_node: String,
     synced_with: Vec<String>,
     //
-    last_update: Instant,
+    last_update: Option<Instant>,
 }
 
 pub struct FileManager {
@@ -50,10 +51,10 @@ pub enum FileManagerOperations {
         path: Box<Path>,
     },
     Delete {
-        id: u64,
+        id: String,
     },
     Update {
-        id: u64,
+        id: String,
         file_entity_mergeable: FileEntity,
     },
 }
@@ -67,53 +68,58 @@ impl FileManager {
         }
     }
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        loop {
-            tokio::select! {
-                Some(query) = self.rx.recv()  => {
-                    match query {
-
-                    InsertRequired{ file_entity } => {}
-                        InsertSystem{ path } => {
-                            let err = verify_permissions(path.as_ref(), false).err();
-                            if let Some(file_error) = err {
-                                match file_error.kind() {
-                                    ErrorKind::NotFound => {
-                                        println!("Cannot find specified file at: {}", path.to_str().unwrap());
-                                        break;
-                                    }
-                                    _ => {break;}
-                                }
+        let handle = |query: &FileManagerOperations| -> Result<(), Box<dyn Error>> {
+            match query {
+                InsertRequired { file_entity } => {
+                    Ok(())
+                }
+                InsertSystem { path } => {
+                    let err = verify_permissions(path.as_ref(), false).err();
+                    if let Some(file_error) = err {
+                        match file_error.kind() {
+                            ErrorKind::NotFound => {
+                                return Err(of_type(&format!("Cannot find specified file at: {}", path.to_str().unwrap()), ErrorKind::Other));
                             }
+                            _ => {}
+                        }
+                    }
 
-                            let mut lck = self.attached_files.try_lock()?;
+                    let mut lck = self.attached_files.try_lock()?;
 
-                            let mut next_id = 1;
-                            if !lck.is_empty() {
-                            let last_entity = lck.last();
-                                if let Some(ent) = last_entity {
-                                    next_id = ent.id + 1;
-                                }
-                            }
 
-                            let hash = blake_digest(&path)?;
-                            if let Some(current_device_id) =device_id() {
-                             lck.push(
-                                FileEntity {
-                                id: next_id,
-                            prev_hash: None,
+                    let hash = blake_digest(&path)?;
+                    if let Some(current_device_id) = device_id() {
+                        lck.push(
+                            FileEntity {
+                                id: Uuid::new_v4().to_string(),
+                                prev_hash: None,
                                 current_hash: hash,
                                 main_node: current_device_id,
                                 synced_with: vec![],
-                                    last_update: Instant::now()});
+                                last_update: Some(Instant::now()),
+                            });
 
-                            println!("Added new file to the space: {}", path.to_str().unwrap());
-                            }
-                        }
-                        Delete{ id } => {
-                            let mut lck = self.attached_files.try_lock()?;
-                            lck.retain(|x| x.id != id);
-                        }
-                        Update{ .. } => {}}
+                        println!("Added new file to the space: {}", path.to_str().unwrap());
+                    }
+                    Ok(())
+                }
+                Delete { id } => {
+                    let mut lck = self.attached_files.try_lock()?;
+                    lck.retain(|x| !x.id.eq(id));
+                    Ok(())
+                }
+                Update { id, file_entity_mergeable } => {
+                    let mut lck = self.attached_files.try_lock()?;
+                    if let Some(ent) = lck.iter()
+                        .find(|x| x.id.eq(id)).as_mut() {}
+                    Ok(())
+                }
+            }
+        };
+        loop {
+            tokio::select! {
+                Some(query) = self.rx.recv()  => {
+
                 },
                 else => break
             }
@@ -128,24 +134,23 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
         return Err(permissions.err().unwrap());
     }
     let mut current_state = ProcessedFiles.lock().await;
-    let filepath = path
-        .as_ref()
-        .to_str()
-        .expect("Cannot extract filepath")
-        .as_bytes();
 
-    let blake_filepath_hash = blake3::hash(filepath);
-    // match current_state.entry(blake_filepath_hash.to_string()) {
-    //     Entry::Occupied(entry) => {
-    //         println!("Recalculating hashes for {}", path.as_ref().to_str().unwrap());
-    //     }
-    //     Entry::Vacant(_) => {
-    //         current_state.insert(blake_filepath_hash.to_string(), FileEntity {
-    //             prev_hash: None,
-    //             current_hash:,
-    //         })
-    //     }
-    // }
+    let blake_filepath_hash = blake_digest(&path)?;
+    match current_state.entry(blake_filepath_hash.to_string()) {
+        Entry::Occupied(entry) => {
+            println!("Recalculating hashes for {}", path.as_ref().to_str().unwrap());
+        }
+        Entry::Vacant(_) => {
+            current_state.insert(blake_filepath_hash.to_string(), FileEntity {
+                id: Uuid::new_v4().to_string(),
+                prev_hash: None,
+                current_hash: blake_filepath_hash,
+                main_node: DeviceId.clone(),
+                synced_with: vec![],
+                last_update: None,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -175,47 +180,9 @@ pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), Com
     Ok(())
 }
 
-pub fn blake_digest<T: AsRef<Path>>(path: T) -> Result<Hash, Box<dyn Error>> {
-    let mut hasher = Hasher::new();
-
-    let file = File::open(path.as_ref())?;
-    let md = file.metadata()?;
-    let file_size = md.len() / 1024;
-
-    let mut reader = BufReader::new(file);
-    if is_file_binary_utf8(path.as_ref())? {
-        let mut buff = [0; 65536];
-
-        loop {
-            let bytes_read = reader.read(&mut buff)?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            hasher.update_rayon(&buff[..bytes_read]);
-        }
-    } else {
-        let mut holder = String::new();
-
-        if file_size > 128 {
-            while reader.read_line(&mut holder)? > 0 {
-                hasher.update_rayon(holder.as_bytes());
-                holder.clear();
-            }
-        } else {
-            while reader.read_line(&mut holder)? > 0 {
-                hasher.update(holder.as_bytes());
-                holder.clear();
-            }
-        }
-    }
-
-    Ok(hasher.finalize())
-}
-
 mod diff_test {
     use crate::consts::DEFAULT_TEST_SUBDIR;
-    use crate::diff::blake_digest;
+    use crate::diff::util::blake_digest;
     use crate::utils::get_default_application_dir;
     use std::fs;
     use std::fs::File;
