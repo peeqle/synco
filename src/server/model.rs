@@ -117,7 +117,14 @@ pub struct ServerTcpPeer {
     pub device_id: String,
     pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
-    pub writer_response: Sender<ServerResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Crud {
+    Create,
+    Read,
+    Update,
+    Delete
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +147,9 @@ pub enum ServerRequest {
         id: String,
         path: String,
         hash: String,
-    }
+        action: Crud
+    },
+    SeedingFiles
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +169,9 @@ pub enum ServerResponse {
     },
     Certificate {
         cert: String
+    },
+    SeedingFiles {
+        files_data: Vec<String>
     },
     Error {
         message: String,

@@ -4,12 +4,12 @@ use crate::challenge::{
 };
 use crate::consts::{of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::diff::{add_file_request, attach};
+use crate::diff::{add_file_request, attach, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
-use crate::server::model::{ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
+use crate::server::model::{Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
 use crate::utils::get_server_cert_storage;
 use crate::CommonThreadError;
 use lazy_static::lazy_static;
@@ -99,10 +99,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                             .last()
                     };
 
-                    if connecting_device_option.is_some() {
-                        let connecting_device = connecting_device_option.unwrap();
-
-                        let (req_sender, req_receiver) = mpsc::channel::<ServerRequest>(100);
+                    if let Some(connecting_device) = connecting_device_option {
                         let (res_sender, mut res_receiver) = mpsc::channel::<ServerResponse>(100);
 
                         {
@@ -112,17 +109,17 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                                     device_id: connecting_device.device_id.clone(),
                                     connection: Arc::new(Mutex::new(tls_stream)),
                                     connection_status: Unknown,
-                                    writer_response: res_sender,
                                 });
                             if device_connection.connection_status == Unknown {
                                 let connection = device_connection.connection.clone();
+                                let device_id = device_connection.device_id.clone();
                                 tokio::spawn(async move {
                                     let mut buffer = Vec::new();
                                     loop {
                                         let mut locked_connection = connection.lock().await;
-                                        match locked_connection.read_to_end(&mut buffer).await {
+                                        match locked_connection.read(&mut buffer).await {
                                             Ok(_) => {
-                                                handle_server_request(device_connection.device_id.clone(), buffer.clone()).await;
+                                                handle_server_request(&device_id, buffer.clone(), res_sender.clone()).await;
                                                 AsyncWriteExt::flush(&mut buffer).await.expect("Cannot flush");
                                             }
                                             Err(_) => {}
@@ -130,31 +127,25 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                                     };
                                 });
                             }
-
-                            let connection = device_connection.connection.clone();
-                            tokio::spawn(async move {
-                                let mut mtx = connection.lock().await;
-                                let (c, m) = mtx.get_mut();
-                                m.writer().write_all(b"Ping").unwrap();
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                            });
                         }
 
-
+                        let device_id = connecting_device.device_id.clone();
                         tokio::spawn(async move {
+                            let connected_device_id = device_id.clone();
+
+                            let connection = {
+                                let connected_devices_arc = server_arc.connected_devices.lock().await;
+                                if let Some(con) = connected_devices_arc.get(&connected_device_id) {
+                                    con.connection.clone()
+                                } else {
+                                    return;
+                                }
+                            };
+
                             loop {
                                 while let Some(message) = res_receiver.recv().await {
-                                    match message.clone() {
-                                        ServerResponse::SignedCertificate { device_id, .. } => {
-                                            let connected_devices_arc = server_arc.connected_devices.lock().await;
-                                            if let Some(_device) = connected_devices_arc.get(&device_id) {
-                                                send_response_to_client(_device.connection.clone(), message.clone()).await
-                                                    .expect(&format!("Cannot send message to the client: {:?}", message));
-                                            }
-                                        }
-                                        ServerResponse::Error { .. } => {}
-                                        ServerResponse::Certificate { .. } => {}
-                                    }
+                                    send_response_to_client(connection.clone(), message.clone()).await
+                                        .expect(&format!("Cannot send message to the client: {:?}", message));
                                 }
                             }
                         });
@@ -168,7 +159,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
     }
 }
 
-async fn handle_server_request(sender_id: String, buffer: Vec<u8>) {
+async fn handle_server_request(sender_id: &String, buffer: Vec<u8>, sender: Sender<ServerResponse>) {
     match serde_json::from_slice::<ServerRequest>(&buffer) {
         Ok(req) => {
             match req {
@@ -187,13 +178,22 @@ async fn handle_server_request(sender_id: String, buffer: Vec<u8>) {
                 }
                 ServerRequest::AcceptConnection(_) => {}
                 ServerRequest::RejectConnection(_) => {}
-                ServerRequest::FileOperation { id, path, hash } => {
-                    match add_file_request(sender_id, id, path, hash).await {
-                        Ok(_) => {}
-                        Err(err) => {
-                            error!("{:?}", err);
+                ServerRequest::FileOperation { id, path, hash, action } => {
+                    match action {
+                        _ => {
+                            match add_file_request(sender_id, id, path, hash).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    error!("{:?}", err);
+                                }
+                            };
                         }
-                    };
+                    }
+                }
+                ServerRequest::SeedingFiles => {
+                    sender.send(ServerResponse::SeedingFiles {
+                        files_data: get_seeding_files().await
+                    }).await.expect("Cannot send");
                 }
             }
         }

@@ -26,13 +26,10 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use uuid::Uuid;
-use FileManagerOperations::*;
 
 lazy_static! {
-    pub static ref ProcessedFiles: Arc<Mutex<HashMap<String, FileEntity>>> =
+    pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
         Arc::new(Mutex::new(HashMap::new()));
-
-    pub static ref AwaitingFiles: Arc<Mutex<HashMap<String, FileEntity>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 #[derive(Clone)]
@@ -51,27 +48,11 @@ pub struct FileEntity {
     notify: Arc<Notify>,
 }
 
-pub enum FileManagerOperations {
-    InsertRequired {
-        file_entity: FileEntity,
-    },
-    InsertSystem {
-        path: Box<Path>,
-    },
-    Delete {
-        id: String,
-    },
-    Update {
-        id: String,
-        file_entity_mergeable: FileEntity,
-    },
-}
-
-pub async fn add_file_request(device_id: String,
+pub async fn add_file_request(device_id: &String,
                               requesting_system_id: String,
                               requesting_system_path: String,
                               requesting_system_hash: String) -> Result<(), CommonThreadError> {
-    let file_manager = AwaitingFiles.clone();
+    let file_manager = Files.clone();
     let mtx = file_manager.lock().await;
 
     mtx.iter().find(|(_, file)| file.current_hash.to_string().eq(&requesting_system_hash))
@@ -82,13 +63,21 @@ pub async fn add_file_request(device_id: String,
             prev_hash: None,
             current_hash: Hash::from_str(&requesting_system_hash)?,
             is_in_sync: Arc::new(AtomicBool::new(false)),
-            main_node: device_id,
+            main_node: device_id.clone(),
             synced_with: vec![],
             last_update: None,
             notify: Arc::new(Notify::new()),
         }));
 
     Ok(())
+}
+
+pub async fn get_seeding_files() -> Vec<String> {
+    let files = Files.clone();
+    let mtx = files.lock().await;
+
+    mtx.iter().map(|(x, y)| y.id.clone())
+        .collect()
 }
 
 pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
@@ -100,7 +89,7 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
         return Err(of_type(&format!("File is too large, max is {}", MAX_FILE_SIZE_BYTES), ErrorKind::Other));
     }
 
-    let file_manager = ProcessedFiles.clone();
+    let file_manager = Files.clone();
     let mut current_state = file_manager.lock().await;
 
     let blake_filepath_hash = blake_digest(&path)?;
@@ -159,7 +148,7 @@ pub enum SnapshotAction {
 }
 
 pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
-    let file_manager = ProcessedFiles.clone();
+    let file_manager = Files.clone();
     let notify_future = Arc::clone(&file.notify);
 
     let path_arc = Arc::new(path.as_ref().to_path_buf());
