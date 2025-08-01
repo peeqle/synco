@@ -10,7 +10,7 @@ use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
 use crate::server::model::{Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::utils::get_server_cert_storage;
+use crate::utils::{get_server_cert_storage, send_to};
 use crate::CommonThreadError;
 use lazy_static::lazy_static;
 use log::{error, info};
@@ -265,15 +265,7 @@ async fn send_response_to_client(
     response: ServerResponse,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let serialized = serde_json::to_vec(&response)?;
-    if let Err(e) = connection.lock().await.write_all(&serialized).await {
-        Err(Box::new(io::Error::new(
-            ErrorKind::Interrupted,
-            format!("Failed to write response: {}", e),
-        )))
-    } else {
-        connection.lock().await.flush().await?;
-        Ok(())
-    }
+    send_to(connection, serialized).await
 }
 
 async fn send_challenge(

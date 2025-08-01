@@ -9,11 +9,14 @@ use der::Writer;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
+use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 pub mod control {
     use std::error::Error;
@@ -37,6 +40,24 @@ pub fn device_id() -> Option<String> {
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
+pub async fn send_to<T>(connection: Arc<Mutex<T>>, request: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    T: AsyncWrite + Unpin + Send + 'static,
+{
+    let mut conn_guard = connection.lock().await;
+
+    if let Err(e) = conn_guard.write_all(&request).await {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::Interrupted,
+            format!("Failed to write response: {}", e),
+        )));
+    }
+
+    conn_guard.flush().await?;
+
+    Ok(())
+}
+
 pub enum DirType {
     Action,
     Cache,
@@ -51,11 +72,11 @@ pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
             dirs::cache_dir()
         }
     }.ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::Unsupported,
-                "Could not determine application data directory for this OS.",
-            )
-        })
+        io::Error::new(
+            ErrorKind::Unsupported,
+            "Could not determine application data directory for this OS.",
+        )
+    })
         .unwrap();
     app_data_dir.push(DEFAULT_APP_SUBDIR);
 
