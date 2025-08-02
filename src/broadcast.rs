@@ -116,16 +116,15 @@ pub async fn start_listener() -> Result<(), CommonThreadError> {
 
                     if !known_devices.contains_key(&msg.device_id) {
                         add_new_device(msg.device_id.clone(), remote_addr).await;
-                    }
 
-                    //generate challenge
-                    if msg.wants_to_connect && !challenge_manager.can_request_new_connection(&msg.device_id).await {
-                        challenge_manager
-                            .get_sender()
-                            .send(ChallengeEvent::NewDevice {
-                                device_id: msg.device_id.clone(),
-                            })
-                            .await?;
+                        if msg.wants_to_connect && !challenge_manager.can_request_new_connection(&msg.device_id).await {
+                            challenge_manager
+                                .get_sender()
+                                .send(ChallengeEvent::NewDevice {
+                                    device_id: msg.device_id.clone(),
+                                })
+                                .await?;
+                        }
                     }
                 }
             }

@@ -1,5 +1,6 @@
 use crate::consts::{CommonThreadError, DeviceId, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
 use crate::keychain::server::generate_root_ca;
+use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -75,7 +76,7 @@ pub(crate) fn load_leaf_private_key_der() -> Result<PrivateKeyDer<'static>, Comm
 }
 
 pub fn load_cert(called_within: bool) -> io::Result<Certificate> {
-    let file = OpenOptions::new().read(true).open(get_default_application_dir().join(CERT_FILE_NAME));
+    let file = OpenOptions::new().read(true).open(get_default_application_dir(Action).join(CERT_FILE_NAME));
     match file {
         Ok(_) => {
             let mut reader = BufReader::new(file?);
@@ -108,7 +109,7 @@ pub fn load_cert(called_within: bool) -> io::Result<Certificate> {
 }
 
 pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
-    let app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir(Action);
     let key_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
 
     let loader: fn(&PathBuf) -> Result<KeyPair, Box<dyn Error>> = |path: &PathBuf| {
@@ -161,6 +162,7 @@ pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
 pub mod node {
     use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
     use crate::utils::get_default_application_dir;
+    use crate::utils::DirType::Action;
     use log::info;
     use rcgen::{CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
     use std::fs;
@@ -180,7 +182,7 @@ pub mod node {
     }
 
     pub fn save_node_signed_cert(server_id: String, signed_cert: &str, keypair: KeyPair) -> Result<(PathBuf, PathBuf), CommonThreadError> {
-        let client_keys_storage = get_default_application_dir()
+        let client_keys_storage = get_default_application_dir(Action)
             .join(&DEFAULT_CLIENT_CERT_STORAGE).join(&server_id);
         fs::create_dir_all(&client_keys_storage)?;
 
@@ -240,6 +242,7 @@ pub mod node {
 
     pub mod load {
         use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
+        use crate::utils::DirType::Action;
         use crate::utils::{get_default_application_dir, get_server_cert_storage};
         use log::info;
         use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -247,7 +250,7 @@ pub mod node {
         use std::io::Cursor;
 
         pub fn load_server_signed_cert_der(server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
-            let client_keys_storage = get_default_application_dir()
+            let client_keys_storage = get_default_application_dir(Action)
                 .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
 
             if !client_keys_storage.exists() {
@@ -267,7 +270,7 @@ pub mod node {
         }
 
         pub fn node_cert_exists(server_id: &str) -> bool {
-            let client_keys_storage = get_default_application_dir()
+            let client_keys_storage = get_default_application_dir(Action)
                 .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
             let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
             let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
@@ -282,7 +285,7 @@ pub mod node {
         }
 
         pub fn load_node_cert_pem(server_id: &str) -> Result<String, CommonThreadError> {
-            let client_keys_storage = get_default_application_dir()
+            let client_keys_storage = get_default_application_dir(Action)
                 .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
             let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
 
@@ -297,7 +300,7 @@ pub mod node {
         }
 
         pub fn load_node_key_pem(server_id: &str) -> Result<String, CommonThreadError> {
-            let client_keys_storage = get_default_application_dir()
+            let client_keys_storage = get_default_application_dir(Action)
                 .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
             let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
 
@@ -341,6 +344,7 @@ pub mod server {
 
     use crate::keychain::server::load::load_leaf_crt;
     use crate::keychain::{create_leaf_ca_params, create_root_ca_params, generate_cert_keys, load_cert, load_private_key};
+    use crate::utils::DirType::Action;
     use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
     use log::info;
     use log::Level::Error;
@@ -353,7 +357,7 @@ pub mod server {
 
     pub fn generate_root_ca() -> Result<(PathBuf, PathBuf), CommonThreadError> {
         let (ca_path, kp_path) = {
-            let server_storage: PathBuf = get_default_application_dir();
+            let server_storage: PathBuf = get_default_application_dir(Action);
             fs::create_dir_all(&server_storage)?;
             (server_storage.join(CA_CERT_FILE_NAME), server_storage.join(CA_KEY_FILE_NAME))
         };
@@ -520,7 +524,7 @@ pub fn sign(msg: String) -> Result<Signature, CommonThreadError> {
 
 
 fn load_signing_key_or_create() -> Result<SigningKey, CommonThreadError> {
-    let mut app_data_dir = get_default_application_dir();
+    let mut app_data_dir = get_default_application_dir(Action);
 
     let key_file_path = app_data_dir.join(SIGNING_KEY);
     match fs::read(&key_file_path) {
@@ -551,7 +555,7 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
     let private_key_bytes = signing_key.to_bytes();
 
-    let app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir(Action);
 
     let key_file_path = app_data_dir.join(SIGNING_KEY);
     let mut file = File::create(&key_file_path)?;
@@ -595,7 +599,7 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let private_key_pem = keypair.serialize_pem();
     let cert_pem = cert.pem();
 
-    let app_data_dir = get_default_application_dir();
+    let app_data_dir = get_default_application_dir(Action);
     let key_file_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
     let cert_file_path = app_data_dir.join(CERT_FILE_NAME);
 

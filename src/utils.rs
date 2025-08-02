@@ -1,5 +1,6 @@
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
 use crate::keychain::DEVICE_SIGNING_KEY;
+use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
@@ -8,11 +9,14 @@ use der::Writer;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
+use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 pub mod control {
     use std::error::Error;
@@ -36,14 +40,43 @@ pub fn device_id() -> Option<String> {
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
-pub fn get_default_application_dir() -> PathBuf {
-    let mut app_data_dir = dirs::data_dir()
-        .ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::Unsupported,
-                "Could not determine application data directory for this OS.",
-            )
-        })
+pub async fn send_to<T>(connection: Arc<Mutex<T>>, request: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    T: AsyncWrite + Unpin + Send + 'static,
+{
+    let mut conn_guard = connection.lock().await;
+
+    if let Err(e) = conn_guard.write_all(&request).await {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::Interrupted,
+            format!("Failed to write response: {}", e),
+        )));
+    }
+
+    conn_guard.flush().await?;
+
+    Ok(())
+}
+
+pub enum DirType {
+    Action,
+    Cache,
+}
+
+pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
+    let mut app_data_dir = match dir_type {
+        DirType::Action => {
+            dirs::data_dir()
+        }
+        DirType::Cache => {
+            dirs::cache_dir()
+        }
+    }.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::Unsupported,
+            "Could not determine application data directory for this OS.",
+        )
+    })
         .unwrap();
     app_data_dir.push(DEFAULT_APP_SUBDIR);
 
@@ -62,28 +95,6 @@ pub fn get_default_application_dir() -> PathBuf {
     app_data_dir
 }
 
-pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<io::Error>> {
-    if !fs::exists(path.as_ref())? {
-        return Err(Box::new(io::Error::new(
-            ErrorKind::NotFound,
-            format!("File is not found: {}", path.as_ref().display()).as_str(),
-        )));
-    }
-
-    let md = fs::metadata(path.as_ref())?;
-    let permissions = md.permissions();
-    let readonly = permissions.readonly();
-
-    if readonly && need_write {
-        return Err(Box::new(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!("Cannot reach file for write: {}", path.as_ref().display()).as_str(),
-        )));
-    }
-
-    Ok(())
-}
-
 pub(crate) fn load_cas<T: AsRef<Path>>(path: T) -> io::Result<RootCertStore> {
     let mut root_store = RootCertStore::empty();
     let mut reader = BufReader::new(File::open(path)?);
@@ -100,14 +111,14 @@ pub(crate) fn load_cas<T: AsRef<Path>>(path: T) -> io::Result<RootCertStore> {
 Generates client storage on SERVER side for storing signed client PEM
 */
 pub fn get_client_cert_storage() -> PathBuf {
-    let dir = get_default_application_dir();
+    let dir = get_default_application_dir(Action);
     fs::create_dir_all(&dir.join(DEFAULT_CLIENT_CERT_STORAGE)).unwrap();
 
     dir.join(DEFAULT_CLIENT_CERT_STORAGE)
 }
 
 pub fn get_server_cert_storage() -> PathBuf {
-    let dir = get_default_application_dir();
+    let dir = get_default_application_dir(Action);
     fs::create_dir_all(&dir.join(DEFAULT_SERVER_CERT_STORAGE)).unwrap();
 
     dir.join(DEFAULT_SERVER_CERT_STORAGE)

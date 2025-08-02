@@ -1,8 +1,10 @@
 use crate::broadcast::DiscoveredDevice;
+use crate::client::ClientActivity::OpenConnection;
+use crate::client::DefaultClientManager;
 use crate::consts::CHALLENGE_DEATH;
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
-use crate::server::model::{ServerRequest, ConnectionState, ServerActivity, StaticCertResolver, ServerTcpPeer, TcpServer};
+use crate::server::model::{ConnectionState, ServerActivity, ServerRequest, ServerTcpPeer, StaticCertResolver, TcpServer};
 use crate::server::DefaultServer;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
@@ -28,8 +30,6 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
-use crate::client::ClientActivity::OpenConnection;
-use crate::client::DefaultClientManager;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -75,7 +75,7 @@ impl ConnectionStatusVerification for DeviceChallengeStatus {
     fn verify_self(&self) -> Result<bool, Box<dyn Error>> {
         let now = Instant::now();
         match self {
-            DeviceChallengeStatus::Active {
+            Active {
                 socket_addr,
                 nonce,
                 nonce_hash,
