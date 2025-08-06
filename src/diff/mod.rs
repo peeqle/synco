@@ -53,21 +53,25 @@ pub async fn add_file_request(device_id: &String,
                               requesting_system_path: String,
                               requesting_system_hash: String) -> Result<(), CommonThreadError> {
     let file_manager = Files.clone();
-    let mtx = file_manager.lock().await;
+    let mut mtx = file_manager.lock().await;
 
-    mtx.iter().find(|(_, file)| file.current_hash.to_string().eq(&requesting_system_hash))
-        .get_or_insert((&requesting_system_hash, &FileEntity {
-            id: requesting_system_id,
-            path: PathBuf::from(&requesting_system_path),
-            snapshot_path: None,
-            prev_hash: None,
-            current_hash: Hash::from_str(&requesting_system_hash)?,
-            is_in_sync: Arc::new(AtomicBool::new(false)),
-            main_node: device_id.clone(),
-            synced_with: vec![],
-            last_update: None,
-            notify: Arc::new(Notify::new()),
-        }));
+    match mtx.entry(requesting_system_hash.clone()) {
+        Entry::Occupied(_) => {}
+        Entry::Vacant(e) => {
+            e.insert(FileEntity {
+                id: requesting_system_id,
+                path: PathBuf::from(&requesting_system_path),
+                snapshot_path: None,
+                prev_hash: None,
+                current_hash: Hash::from_str(&requesting_system_hash)?,
+                is_in_sync: Arc::new(AtomicBool::new(false)),
+                main_node: device_id.clone(),
+                synced_with: vec![],
+                last_update: None,
+                notify: Arc::new(Notify::new()),
+            });
+        }
+    }
 
     Ok(())
 }

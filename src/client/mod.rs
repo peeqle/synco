@@ -1,19 +1,12 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::consts::{
-    of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT,
-};
+use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::keychain::node::load::{
-    load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der,
-    node_cert_exists,
-};
+use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
 use crate::server::model::ConnectionState::Unknown;
-use crate::server::model::{
-    ConnectionState, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer,
-};
+use crate::server::model::{ConnectionState, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage, load_cas, send_to};
 use lazy_static::lazy_static;
@@ -44,18 +37,19 @@ use tokio_rustls::{TlsConnector, TlsStream};
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
         let (sender, receiver) = mpsc::channel::<ClientActivity>(500);
-        Arc::new(ClientManager {
-            connections: Arc::new(Mutex::new(HashMap::new())),
-            bounded_channel: (sender, Mutex::new(receiver)),
+        Arc::new( ClientManager {
+            connections:Arc::new(Mutex::new(HashMap::new())),
+            bounded_channel: (sender, Mutex::new(receiver)) 
         })
     };
-    pub static ref SigningRequests: Arc<Mutex<HashMap<String, bool>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+
+    pub static ref SigningRequests: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientActivity {
-    OpenConnection { device_id: String },
+    OpenConnection { device_id: String }
 }
 
 pub struct ClientManager {
@@ -67,7 +61,7 @@ pub struct ClientManager {
 pub struct TcpClient {
     server_id: String,
     configuration: Arc<ClientConfig>,
-    pub connection: Arc<Option<ClientTcpPeer>>,
+    pub connection: Arc<Mutex<Option<ClientTcpPeer>>>,
 }
 #[derive(Clone, Debug)]
 pub struct ClientTcpPeer {
@@ -81,7 +75,7 @@ impl TcpClient {
         Ok(TcpClient {
             server_id: server_id.clone(),
             configuration: Arc::new(Self::create_client_config(server_id.clone())?),
-            connection: Arc::new(None),
+            connection: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -90,9 +84,7 @@ impl TcpClient {
             return Err(format!("Client certificate not found for device: {}", server_id).into());
         }
 
-        let ca_cert_path = get_server_cert_storage()
-            .join(&server_id)
-            .join(CERT_FILE_NAME);
+        let ca_cert_path = get_server_cert_storage().join(&server_id).join(CERT_FILE_NAME);
         if !ca_cert_path.exists() {
             return Err(format!("CA certificate not found for server: {}", server_id).into());
         }
@@ -100,7 +92,7 @@ impl TcpClient {
         Ok(TcpClient {
             server_id: server_id.clone(),
             configuration: Arc::new(Self::create_client_config(server_id.clone())?),
-            connection: Arc::new(None),
+            connection: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -115,26 +107,19 @@ impl TcpClient {
             let mut root_store = RootCertStore::empty();
 
             info!("Loading server CA certificate for: {}", server_id);
-            let ca_cert_der = load_server_signed_ca(&server_id).map_err(|e| {
-                error!(
-                    "Failed to load server CA certificate for {}: {}",
-                    server_id, e
-                );
-                format!("Cannot load server CA certificate for {}: {}", server_id, e)
-            })?;
+            let ca_cert_der = load_server_signed_ca(&server_id)
+                .map_err(|e| {
+                    error!("Failed to load server CA certificate for {}: {}", server_id, e);
+                    format!("Cannot load server CA certificate for {}: {}", server_id, e)
+                })?;
 
-            root_store.add(ca_cert_der).map_err(|e| {
-                error!(
-                    "Cannot add server CA certificate to RootStore for {}: {:?}",
-                    server_id, e
-                );
-                format!("Cannot add server CA certificate to RootStore: {:?}", e)
-            })?;
+            root_store.add(ca_cert_der)
+                .map_err(|e| {
+                    error!("Cannot add server CA certificate to RootStore for {}: {:?}", server_id, e);
+                    format!("Cannot add server CA certificate to RootStore: {:?}", e)
+                })?;
 
-            info!(
-                "Successfully loaded server CA certificate for: {}",
-                server_id
-            );
+            info!("Successfully loaded server CA certificate for: {}", server_id);
             root_store
         };
 
@@ -154,142 +139,109 @@ impl TcpClient {
             .with_webpki_verifier(client_cert_verifier)
             .with_client_auth_cert(vec![cert], pk)
             .map_err(|e| {
-                error!(
-                    "Failed to create client config with client auth for {}: {:?}",
-                    server_id, e
-                );
+                error!("Failed to create client config with client auth for {}: {:?}", server_id, e);
                 format!("Failed to create client config: {:?}", e)
             })?;
 
-        info!(
-            "Successfully created TLS client configuration for: {}",
-            server_id
-        );
+        info!("Successfully created TLS client configuration for: {}", server_id);
         Ok(config)
     }
 }
 
 pub async fn run(_manager: Arc<ClientManager>) -> Result<(), CommonThreadError> {
     info!("Starting client...");
-    let res = tokio::try_join!(tokio::spawn(listen(Arc::clone(&_manager))),);
+    let res = tokio::try_join!(
+        tokio::spawn(listen(Arc::clone(&_manager))),
+    );
     Ok(())
 }
 
+
 async fn listen(_manager: Arc<ClientManager>) {
-    let handle_fn = async |x: ClientActivity| match x {
-        ClientActivity::OpenConnection { device_id } => {
-            let empty = {
-                let mtx = Arc::clone(&DefaultClientManager);
-                !mtx.connections.lock().await.contains_key(&device_id)
-            };
+    let handle_fn = async |x: ClientActivity| {
+        match x {
+            ClientActivity::OpenConnection { device_id } => {
+                let empty = {
+                    let mtx = Arc::clone(&DefaultClientManager);
+                    !mtx.connections.lock().await.contains_key(&device_id)
+                };
 
-            if empty {
-                let device_manager = Arc::clone(&DefaultDeviceManager);
-                if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
-                    info!("Starting certificate setup for device: {}", device_id);
+                if empty {
+                    let device_manager = Arc::clone(&DefaultDeviceManager);
+                    if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
+                        info!("Starting certificate setup for device: {}", device_id);
 
-                    let ca_cert_path = get_server_cert_storage()
-                        .join(&device_id)
-                        .join(CERT_FILE_NAME);
-                    let need_ca = !ca_cert_path.exists();
-                    let need_client_cert = !node_cert_exists(&device_id);
+                        let ca_cert_path = get_server_cert_storage().join(&device_id).join(CERT_FILE_NAME);
+                        let need_ca = !ca_cert_path.exists();
+                        let need_client_cert = !node_cert_exists(&device_id);
 
-                    if need_ca {
-                        info!("CA certificate missing for {}, fetching...", device_id);
-                        match request_ca(&device).await {
-                            Ok(_) => {
-                                info!(
-                                    "CA certificate fetched successfully for device: {}",
-                                    device_id
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to fetch CA certificate for device {}: {}",
-                                    device_id, e
-                                );
-                                return;
-                            }
-                        }
-                    } else {
-                        info!("CA certificate already exists for device: {}", device_id);
-                    }
-
-                    if need_client_cert {
-                        info!(
-                            "Client certificate missing for {}, requesting signature...",
-                            device_id
-                        );
-                        match request_signed_cert(device).await {
-                            Ok(_) => {
-                                info!(
-                                    "Client certificate signed successfully for device: {}",
-                                    device_id
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to get signed certificate for device {}: {}",
-                                    device_id, e
-                                );
-                                return;
-                            }
-                        }
-                    } else {
-                        info!(
-                            "Client certificate already exists for device: {}",
-                            device_id
-                        );
-                    }
-
-                    match open_connection(device_id.clone()).await {
-                        Ok(_) => {
-                            info!("Connection opened successfully for device: {}", device_id);
-                        }
-                        Err(e) => {
-                            error!("Failed to open connection for device {}: {}", device_id, e);
-
-                            if e.to_string().contains("UnknownIssuer")
-                                || e.to_string().contains("invalid peer certificate")
-                            {
-                                error!(
-                                    "Certificate validation failed, cleaning up certificates for {}",
-                                    device_id
-                                );
-
-                                let _ = std::fs::remove_dir_all(
-                                    get_server_cert_storage().join(&device_id),
-                                );
-                                let _ = std::fs::remove_dir_all(
-                                    get_default_application_dir(Action)
-                                        .join("client")
-                                        .join(&device_id),
-                                );
-
-                                info!("Retrying certificate setup for device: {}", device_id);
-
-                                if let Err(retry_error) = async {
-                                    request_ca(&device).await?;
-                                    request_signed_cert(&device).await?;
-                                    open_connection(device_id.clone()).await
+                        if need_ca {
+                            info!("CA certificate missing for {}, fetching...", device_id);
+                            match request_ca(&device).await {
+                                Ok(_) => {
+                                    info!("CA certificate fetched successfully for device: {}", device_id);
                                 }
-                                .await
-                                {
-                                    error!(
-                                        "Retry failed for device {}: {}",
-                                        device_id, retry_error
+                                Err(e) => {
+                                    error!("Failed to fetch CA certificate for device {}: {}", device_id, e);
+                                    return;
+                                }
+                            }
+                        } else {
+                            info!("CA certificate already exists for device: {}", device_id);
+                        }
+
+                        if need_client_cert {
+                            info!("Client certificate missing for {}, requesting signature...", device_id);
+                            match request_signed_cert(device).await {
+                                Ok(_) => {
+                                    info!("Client certificate signed successfully for device: {}", device_id);
+                                }
+                                Err(e) => {
+                                    error!("Failed to get signed certificate for device {}: {}", device_id, e);
+                                    return;
+                                }
+                            }
+                        } else {
+                            info!("Client certificate already exists for device: {}", device_id);
+                        }
+
+                        match open_connection(device_id.clone()).await {
+                            Ok(_) => {
+                                info!("Connection opened successfully for device: {}", device_id);
+                            }
+                            Err(e) => {
+                                error!("Failed to open connection for device {}: {}", device_id, e);
+
+                                if e.to_string().contains("UnknownIssuer") || e.to_string().contains("invalid peer certificate") {
+                                    error!("Certificate validation failed, cleaning up certificates for {}", device_id);
+
+                                    let _ = std::fs::remove_dir_all(get_server_cert_storage().join(&device_id));
+                                    let _ = std::fs::remove_dir_all(
+                                        get_default_application_dir(Action)
+                                            .join("client")
+                                            .join(&device_id)
                                     );
-                                } else {
-                                    info!("Retry successful for device: {}", device_id);
+
+                                    info!("Retrying certificate setup for device: {}", device_id);
+
+                                    if let Err(retry_error) = async {
+                                        request_ca(&device).await?;
+                                        request_signed_cert(&device).await?;
+                                        open_connection(device_id.clone()).await
+                                    }.await {
+                                        error!("Retry failed for device {}: {}", device_id, retry_error);
+                                    } else {
+                                        info!("Retry successful for device: {}", device_id);
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        error!("Device {} not found in known devices registry", device_id);
                     }
                 } else {
-                    error!("Device {} not found in known devices registry", device_id);
+                    info!("Connection already exists for device: {}", device_id);
                 }
-            } else {
-                info!("Connection already exists for device: {}", device_id);
             }
         }
     };
@@ -300,6 +252,7 @@ async fn listen(_manager: Arc<ClientManager>) {
         }
     }
 }
+
 
 async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     info!("Opening connection to: {}", &server_id);
@@ -318,30 +271,21 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             format!("Device not found: {}", server_id)
         })?;
 
-    info!(
-        "Device found: {} at {}",
-        device.device_id, device.connect_addr
-    );
+    info!("Device found: {} at {}", device.device_id, device.connect_addr);
 
     info!("Connecting to: {}", device.connect_addr);
-    let stream = TcpStream::connect(&device.connect_addr)
-        .await
+    let stream = TcpStream::connect(&device.connect_addr).await
         .map_err(|e| {
             error!("Failed to connect to {}: {}", device.connect_addr, e);
             format!("Failed to connect to {}: {}", device.connect_addr, e)
         })?;
 
-    info!(
-        "TCP connection established, creating TLS client configuration for: {}",
-        server_id
-    );
-    let mut client = TcpClient::new_with_verified_certs(device.device_id.clone()).map_err(|e| {
-        error!(
-            "Failed to create TLS client config for {}: {}",
-            server_id, e
-        );
-        format!("TLS client configuration failed: {}", e)
-    })?;
+    info!("TCP connection established, creating TLS client configuration for: {}", server_id);
+    let client = TcpClient::new_with_verified_certs(device.device_id.clone())
+        .map_err(|e| {
+            error!("Failed to create TLS client config for {}: {}", server_id, e);
+            format!("TLS client configuration failed: {}", e)
+        })?;
 
     let connector = TlsConnector::from(client.configuration.clone());
 
@@ -349,9 +293,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     let tls_stream = connector
         .connect(
             ServerName::IpAddress(rustls_pki_types::IpAddr::V4(
-                rustls_pki_types::Ipv4Addr::try_from(
-                    device.connect_addr.ip().to_string().as_str(),
-                )?,
+                rustls_pki_types::Ipv4Addr::try_from(device.connect_addr.ip().to_string().as_str())?
             )),
             stream,
         )
@@ -361,12 +303,9 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             format!("TLS connection failed: {}", e)
         })?;
 
-    info!(
-        "TLS connection established successfully with: {}",
-        server_id
-    );
+    info!("TLS connection established successfully with: {}", server_id);
 
-    let (client_sender, mut client_receiver) = mpsc::channel(200);
+    let (client_sender, client_receiver) = mpsc::channel(200);
 
     let new_peer = ClientTcpPeer {
         connection: Arc::new(Mutex::new(tls_stream)),
@@ -374,7 +313,30 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         sender: client_sender,
     };
 
-    let connection_reader = Arc::clone(&new_peer.connection);
+    start_server_response_listener(&new_peer, server_id.clone());
+
+    //Tcp client connection set up
+    {
+        let mut mtx = client.connection.lock().await;
+        mtx.replace(new_peer);
+    }
+
+    //new client append
+    {
+        let manager = Arc::clone(&DefaultClientManager);
+        let mut connections = manager.connections.lock().await;
+        connections.insert(device.device_id.clone(), client);
+    }
+
+    //request receiver initialization
+    start_client_request_listener(&device.device_id, client_receiver).await;
+
+    info!("Connection setup completed for: {}", server_id);
+    Ok(())
+}
+
+fn start_server_response_listener(peer: &ClientTcpPeer, server_id: String) {
+    let connection_reader = Arc::clone(&peer.connection);
     let reader_server_id = server_id.clone();
     tokio::spawn(async move {
         let mut buffer = vec![0; 4096];
@@ -400,126 +362,68 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             // add support for diff metadata and initial file meta handshake
             //async channel for actions?
             //static configuration?
-            info!(
-                "Received {} bytes from {}: {}",
-                bytes_read, reader_server_id, received_data
-            );
+            info!("Received {} bytes from {}: {}", bytes_read, reader_server_id, received_data);
         }
 
         info!("Connection reader task ended for: {}", reader_server_id);
     });
-    client.connection = Arc::new(Some(new_peer));
+}
 
-    {
-        let manager = Arc::clone(&DefaultClientManager);
-        let mut connections = manager.connections.lock().await;
-        connections.insert(device.device_id.clone(), client);
-    }
+async fn start_client_request_listener(server_id: &String, mut client_receiver: Receiver<ServerRequest>) {
+    let manager = Arc::clone(&DefaultClientManager);
+    let mut connections = manager.connections.lock().await;
 
-    let device_id = device.device_id.clone();
-    {
-        let manager = Arc::clone(&DefaultClientManager);
-        let mut connections = manager.connections.lock().await;
-
-        if let Some(device) = connections.get_mut(&device_id).cloned() {
-            if let Some(device_connection) = device.connection.as_ref() {
-                let connection_arc = device_connection.connection.clone();
+    if let Some(device) = connections.get_mut(server_id).cloned() {
+        let peer_mtx = device.connection.lock().await;
+        if peer_mtx.as_ref().is_none() {
+            error!("Cannot find opened connection for device: {}", server_id);
+        } else {
+            if let Some(connector) = peer_mtx.as_ref() {
+                let connection_arc = connector.connection.clone();
                 tokio::spawn(async move {
                     while let Some(message) = client_receiver.recv().await {
-                        send_request_to_server(connection_arc.clone(), &message)
-                            .await
+                        let serialized = serde_json::to_vec(&message)
+                            .expect("Cannot serialize");
+                        send_to(connection_arc.clone(), serialized).await
                             .expect(&format!("Cannot send request to the server: {:?}", message));
                     }
                 });
-            } else {
-                error!(
-                    "Cannot find opened connection for device: {}",
-                    device_id.clone()
-                );
             }
         }
     }
-
-    info!("Connection setup completed for: {}", server_id);
-    Ok(())
 }
 
-pub async fn request_ca(
-    _device: &DiscoveredDevice,
-) -> Result<Option<ServerResponse>, CommonThreadError> {
-    info!(
-        "Requesting CA certificate from device: {}",
-        _device.device_id
-    );
+pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
+    info!("Requesting CA certificate from device: {}", _device.device_id);
 
-    let response = call_signing_server(SigningServerRequest::FetchCrt, _device)
-        .await
+    let response = call_signing_server(SigningServerRequest::FetchCrt, _device).await
         .map_err(|e| {
-            error!(
-                "Failed to call signing server for CA request from {}: {}",
-                _device.device_id, e
-            );
-            format!(
-                "Signing server call failed for {}: {}",
-                _device.device_id, e
-            )
+            error!("Failed to call signing server for CA request from {}: {}", _device.device_id, e);
+            format!("Signing server call failed for {}: {}", _device.device_id, e)
         })?;
 
     if let Some(server_response) = response {
         match server_response {
             ServerResponse::Certificate { cert } => {
-                info!(
-                    "Received CA certificate from {}, saving...",
-                    _device.device_id
-                );
+                info!("Received CA certificate from {}, saving...", _device.device_id);
                 if let Err(e) = save_server_cert(_device.device_id.clone(), cert) {
-                    error!(
-                        "Error while saving server CRT for {}: {}",
-                        _device.device_id, e
-                    );
+                    error!("Error while saving server CRT for {}: {}", _device.device_id, e);
                     return Err(e);
                 }
                 info!("Successfully saved server cert for {}", _device.device_id);
             }
             ServerResponse::Error { message } => {
-                error!(
-                    "Server error during certificate fetch from {}: {}",
-                    _device.device_id, message
-                );
-                return Err(of_type(
-                    &format!(
-                        "Certificate fetch failed from {}: {}",
-                        _device.device_id, message
-                    ),
-                    ErrorKind::Other,
-                ));
+                error!("Server error during certificate fetch from {}: {}", _device.device_id, message);
+                return Err(of_type(&format!("Certificate fetch failed from {}: {}", _device.device_id, message), ErrorKind::Other));
             }
             _ => {
-                error!(
-                    "Unexpected response type for certificate fetch request from {}",
-                    _device.device_id
-                );
-                return Err(of_type(
-                    &format!(
-                        "Certificate fetch failed from {}: Unexpected response type",
-                        _device.device_id
-                    ),
-                    ErrorKind::Other,
-                ));
+                error!("Unexpected response type for certificate fetch request from {}", _device.device_id);
+                return Err(of_type(&format!("Certificate fetch failed from {}: Unexpected response type", _device.device_id), ErrorKind::Other));
             }
         }
     } else {
-        error!(
-            "No response received from signing server for certificate fetch from {}",
-            _device.device_id
-        );
-        return Err(of_type(
-            &format!(
-                "Certificate fetch failed from {}: No response from server",
-                _device.device_id
-            ),
-            ErrorKind::Other,
-        ));
+        error!("No response received from signing server for certificate fetch from {}", _device.device_id);
+        return Err(of_type(&format!("Certificate fetch failed from {}: No response from server", _device.device_id), ErrorKind::Other));
     }
 
     Ok(None)
@@ -528,87 +432,52 @@ pub async fn request_ca(
 pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), CommonThreadError> {
     let (csr_pem, node_keypair) = generate_node_csr(_device.device_id.clone())?;
 
-    if let Some(response) =
-        call_signing_server(SigningServerRequest::SignCsr { csr: csr_pem }, _device)
-            .await
-            .expect("Cannot execute call to signing server")
-    {
+    if let Some(response) = call_signing_server(SigningServerRequest::SignCsr {
+        csr: csr_pem
+    }, _device).await.expect("Cannot execute call to signing server") {
         match response {
-            ServerResponse::SignedCertificate {
-                device_id,
-                cert_pem,
-            } => {
+            ServerResponse::SignedCertificate { device_id, cert_pem } => {
                 info!("Got CRT: {}", &cert_pem);
                 save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
                 return Ok(());
             }
             ServerResponse::Error { message } => {
                 error!("Server error during certificate signing: {}", message);
-                return Err(of_type(
-                    &format!("Certificate signing failed: {}", message),
-                    ErrorKind::Other,
-                ));
+                return Err(of_type(&format!("Certificate signing failed: {}", message), ErrorKind::Other));
             }
             _ => {
                 error!("Unexpected response type for certificate signing request");
-                return Err(of_type(
-                    "Certificate signing failed: Unexpected response type",
-                    ErrorKind::Other,
-                ));
+                return Err(of_type("Certificate signing failed: Unexpected response type", ErrorKind::Other));
             }
         }
     }
-    Err(of_type(
-        "Certificate signing failed: No response from server",
-        ErrorKind::BrokenPipe,
-    ))
+    Err(of_type("Certificate signing failed: No response from server", ErrorKind::BrokenPipe))
 }
 
-pub async fn call_signing_server(
-    req: SigningServerRequest,
-    _device: &DiscoveredDevice,
-) -> Result<Option<ServerResponse>, CommonThreadError> {
+pub async fn call_signing_server(req: SigningServerRequest, _device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     let server_addr = SocketAddr::new(
         IpAddr::try_from(Ipv4Addr::from_str(&_device.connect_addr.ip().to_string())?)?,
-        DEFAULT_SIGNING_SERVER_PORT,
-    );
+        DEFAULT_SIGNING_SERVER_PORT);
 
-    info!(
-        "Connecting to signing server at {} for device {}",
-        server_addr, _device.device_id
-    );
+    info!("Connecting to signing server at {} for device {}", server_addr, _device.device_id);
 
-    let mut stream = TcpStream::connect(server_addr).await.map_err(|e| {
-        format!(
-            "Failed to connect to signing server at {}: {}",
-            server_addr, e
-        )
-    })?;
+    let mut stream = TcpStream::connect(server_addr).await
+        .map_err(|e| format!("Failed to connect to signing server at {}: {}", server_addr, e))?;
 
     let serialized_req = serde_json::to_vec(&req)?;
-    info!(
-        "Sending request to signing server: {} bytes",
-        serialized_req.len()
-    );
+    info!("Sending request to signing server: {} bytes", serialized_req.len());
 
-    stream
-        .write_all(serialized_req.as_slice())
-        .await
+    stream.write_all(serialized_req.as_slice()).await
         .map_err(|e| format!("Failed to send request to signing server: {}", e))?;
 
     let mut buffer = Vec::new();
-    let bytes_read_total = stream
-        .read_to_end(&mut buffer)
-        .await
+    let bytes_read_total = stream.read_to_end(&mut buffer).await
         .map_err(|e| format!("Failed to read response from signing server: {}", e))?;
 
     info!("Received {} bytes from signing server", bytes_read_total);
 
     if bytes_read_total == 0 {
-        error!(
-            "Signing server sent empty response for device {}",
-            _device.device_id
-        );
+        error!("Signing server sent empty response for device {}", _device.device_id);
         return Ok(None);
     }
 
@@ -618,26 +487,10 @@ pub async fn call_signing_server(
             Ok(Some(resp))
         }
         Err(e) => {
-            error!(
-                "Failed to deserialize server response for device {}. Raw data: '{}', Error: {}",
-                _device.device_id,
-                String::from_utf8_lossy(&buffer),
-                e
-            );
-            Err(format!(
-                "Failed to deserialize server response. Raw data: '{}', Error: {}",
-                String::from_utf8_lossy(&buffer),
-                e
-            )
-            .into())
+            error!("Failed to deserialize server response for device {}. Raw data: '{}', Error: {}", 
+                   _device.device_id, String::from_utf8_lossy(&buffer), e);
+            Err(format!("Failed to deserialize server response. Raw data: '{}', Error: {}",
+                        String::from_utf8_lossy(&buffer), e).into())
         }
     }
-}
-
-async fn send_request_to_server(
-    connection: Arc<Mutex<tokio_rustls::client::TlsStream<TcpStream>>>,
-    request: &ServerRequest,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let serialized = serde_json::to_vec(request)?;
-    send_to(connection, serialized).await
 }
