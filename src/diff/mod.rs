@@ -34,11 +34,11 @@ lazy_static! {
 
 #[derive(Clone)]
 pub struct FileEntity {
-    id: String,
-    path: PathBuf,
+    pub id: String,
+    pub path: PathBuf,
     snapshot_path: Option<PathBuf>,
     prev_hash: Option<Hash>,
-    current_hash: Hash,
+    pub current_hash: Hash,
     is_in_sync: Arc<AtomicBool>,
     //devices in-sync
     main_node: String,
@@ -82,6 +82,14 @@ pub async fn get_seeding_files() -> Vec<String> {
 
     mtx.iter().map(|(x, y)| y.id.clone())
         .collect()
+}
+
+pub async fn remove(file_id: &String) -> Result<(), Box<dyn Error>> {
+    let file_manager = Files.clone();
+    let mut mtx = file_manager.lock().await;
+
+    mtx.remove_entry(file_id).expect("Cannot remove entry");
+    Ok(())
 }
 
 pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {

@@ -20,8 +20,8 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::time::sleep;
 
-type DStep = Box<dyn Step>;
-struct ServerAction {
+type DStep = Box<dyn Step + Send + Sync>;
+pub struct ServerAction {
     current_step: Option<DStep>,
     steps: LinkedList<DStep>,
 }
@@ -39,18 +39,19 @@ impl Default for ServerAction {
 }
 
 impl Action for ServerAction {
-    fn step(&self) -> u8 {
-        todo!()
+    fn id(&self) -> String {
+        "server_action".to_string()
+    }
+
+    fn act(&self) -> Box<dyn Fn() -> Result<(), CommonThreadError> + Send + Sync> {
+        Box::new(|| {
+            let start_step = StartServerStep {};
+            start_step.action()
+        })
     }
 
     fn render(&self) {
-        for step in &self.steps {
-            step.render();
-        }
-    }
-
-    fn act(&self) -> Box<dyn Fn() -> Result<(), CommonThreadError>> {
-        todo!()
+        println!("Network management");
     }
 }
 
@@ -70,28 +71,32 @@ impl Step for StartServerStep {
         let rt = Runtime::new().expect("Failed to create Tokio runtime");
 
         rt.spawn(async move {
-            tokio::join!(
-            tokio::spawn(broadcast::start_broadcast_announcer(
-                DEFAULT_LISTENING_PORT,
-                net_addr
-            )),
-            tokio::spawn(broadcast::start_listener()),
-            tokio::spawn(async move { server::run(default_server.clone()).await }),
-            tokio::spawn(async move { challenge::run(challenge_manager.clone()).await }),
-            tokio::spawn(async move { client::run(client_manager.clone()).await }),
-            tokio::spawn(async move { device_manager_arc_for_join.start().await })
-        );
+            let _ = tokio::join!(
+                tokio::spawn(broadcast::start_broadcast_announcer(
+                    DEFAULT_LISTENING_PORT,
+                    net_addr
+                )),
+                tokio::spawn(broadcast::start_listener()),
+                tokio::spawn(async move { server::run(default_server.clone()).await }),
+                tokio::spawn(async move { challenge::run(challenge_manager.clone()).await }),
+                tokio::spawn(async move { client::run(client_manager.clone()).await }),
+                tokio::spawn(async move { device_manager_arc_for_join.start().await })
+            );
         });
 
         Ok(())
     }
 
-    fn next_step(&self) -> Option<Box<dyn Step>> {
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
         None
     }
 
     fn render(&self) {
-        println!("Select files to attach");
+        println!("Start server");
+    }
+
+    fn display(&self) -> &str {
+        "Start server"
     }
 }
 
@@ -116,12 +121,16 @@ impl Step for ListKnownDevices {
         Ok(())
     }
 
-    fn next_step(&self) -> Option<Box<dyn Step>> {
-        todo!()
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
     }
 
     fn render(&self) {
-        todo!()
+        println!("List known devices");
+    }
+
+    fn display(&self) -> &str {
+        "List known devices"
     }
 }
 

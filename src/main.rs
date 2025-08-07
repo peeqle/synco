@@ -1,7 +1,10 @@
 use crate::consts::CommonThreadError;
+use crate::menu::display_menu;
 use crate::server::tls_utils::clear_client_cert_dir;
 use std::error::Error;
+use std::fs;
 use std::ops::Deref;
+use std::path::PathBuf;
 
 mod balancer;
 mod broadcast;
@@ -28,5 +31,17 @@ async fn main() -> Result<(), CommonThreadError> {
         clear_client_cert_dir();
     }
 
+    load_banner();
+    display_menu();
+
     Ok(())
+}
+
+fn load_banner() {
+    let assets = PathBuf::from("assets");
+    if assets.exists() {
+        if fs::exists(assets.join("banner.txt")).unwrap_or(false) {
+            println!("{}", fs::read_to_string(assets.join("banner.txt")).unwrap_or(String::new()));
+        }
+    }
 }

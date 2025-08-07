@@ -1,15 +1,16 @@
 use crate::consts::CommonThreadError;
-use crate::diff::{attach, Files};
-use crate::menu::{Action, Step};
+use crate::diff::{attach, remove, Files};
+use crate::menu::{read_user_input, Action, Step};
 use log::error;
 use std::collections::LinkedList;
+use std::fmt::format;
 use std::io;
-use std::io::Read;
+use std::io::{Error, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-type DStep = Box<dyn Step>;
+type DStep = Box<dyn Step + Send + Sync>;
 pub struct FileAction {
     current_step: Option<DStep>,
     steps: LinkedList<DStep>,
@@ -17,8 +18,13 @@ pub struct FileAction {
 
 impl Default for FileAction {
     fn default() -> Self {
-        let select_file_step_instance = Box::new(SelectFileStep {}) as DStep;
-        let steps: LinkedList<DStep> = LinkedList::from([select_file_step_instance]);
+        let steps: LinkedList<DStep> = LinkedList::from(
+            [
+                Box::new(SelectFileStep {}) as DStep,
+                Box::new(RemoveFileStep {}) as DStep,
+                Box::new(DisplayFilesStep {}) as DStep
+            ]
+        );
 
         FileAction {
             current_step: None,
@@ -28,18 +34,22 @@ impl Default for FileAction {
 }
 
 impl Action for FileAction {
-    fn step(&self) -> u8 {
-        todo!()
+    fn id(&self) -> String {
+        "file_action".to_string()
     }
 
     fn render(&self) {
-        for step in &self.steps {
-            step.render();
+        println!("File management");
+        for (id, x) in self.steps.iter().enumerate() {
+            println!("\t{} {:?}", id, x.display());
         }
     }
 
-    fn act(&self) -> Box<dyn Fn() -> Result<(), CommonThreadError>> {
-        todo!()
+    fn act(&self) -> Box<dyn Fn() -> Result<(), CommonThreadError> + Send + Sync> {
+        Box::new(|| {
+            let select_step = SelectFileStep {};
+            select_step.action()
+        })
     }
 }
 
@@ -69,11 +79,81 @@ impl Step for SelectFileStep {
         Ok(())
     }
 
-    fn next_step(&self) -> Option<Box<dyn Step>> {
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
         None
     }
 
     fn render(&self) {
-        println!("Select files to attach");
+        print!("Select files to attach");
+    }
+
+    fn display(&self) -> &str {
+        "Select files to attach"
+    }
+}
+
+struct DisplayFilesStep {}
+impl Step for DisplayFilesStep {
+    fn action(&self) -> Result<(), CommonThreadError> {
+        let rt = Runtime::new().expect("Failed to create Tokio runtime");
+
+        let result = rt.block_on(async {
+            let files = Files.clone();
+            let mtx_guard = files.lock().await;
+
+            let formatted_strings: Vec<String> = mtx_guard
+                .iter()
+                .map(|(_, file)| {
+                    format!("{}\t{:?}\t{}", file.id, file.path, file.current_hash)
+                })
+                .collect();
+
+            formatted_strings
+        });
+
+        println!("Attached files:");
+        for i in result {
+            println!("{}", i);
+        }
+
+        Ok(())
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn render(&self) {
+        print!("Select files to attach");
+    }
+
+    fn display(&self) -> &str {
+        "Select files to attach"
+    }
+}
+
+struct RemoveFileStep {}
+impl Step for RemoveFileStep {
+    fn action(&self) -> Result<(), CommonThreadError> {
+        print!("Select file to remove: ");
+        let file_id = read_user_input()?;
+
+        let rt = Runtime::new().expect("Failed to create Tokio runtime");
+        if let Err(e) = rt.block_on(remove(&file_id)) {
+            return Err(Box::new(Error::new(ErrorKind::Other, format!("Cannot perform file attachment! \n {}", e))));
+        }
+        Ok(())
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn render(&self) {
+        print!("Select files to remove")
+    }
+
+    fn display(&self) -> &str {
+        "Select files to remove"
     }
 }
