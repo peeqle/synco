@@ -1,6 +1,6 @@
+use crate::consts::CommonThreadError;
 use crate::diff::consts;
 use blake3::{Hash, Hasher};
-use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::Path;
@@ -14,7 +14,7 @@ pub fn verify_file_size<T: AsRef<Path>>(file_path: T) -> bool {
     false
 }
 
-pub fn is_file_binary_utf8<T: AsRef<Path>>(path: T) -> Result<bool, Box<dyn Error>> {
+pub fn is_file_binary_utf8<T: AsRef<Path>>(path: T) -> Result<bool, CommonThreadError> {
     let mut file = File::open(&path)?;
     let mut buffer = vec![0; 4096];
     let bytes_read = file.read(&mut buffer)?;
@@ -55,7 +55,7 @@ pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(
     Ok(())
 }
 
-pub fn blake_digest<T: AsRef<Path>>(path: T) -> Result<Hash, Box<dyn Error>> {
+pub fn blake_digest<T: AsRef<Path>>(path: T) -> Result<Hash, CommonThreadError> {
     let mut hasher = Hasher::new();
 
     let file = File::open(path.as_ref())?;

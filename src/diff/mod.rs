@@ -84,7 +84,7 @@ pub async fn get_seeding_files() -> Vec<String> {
         .collect()
 }
 
-pub async fn remove(file_id: &String) -> Result<(), Box<dyn Error>> {
+pub async fn remove(file_id: &String) -> Result<(), CommonThreadError> {
     let file_manager = Files.clone();
     let mut mtx = file_manager.lock().await;
 
@@ -92,7 +92,7 @@ pub async fn remove(file_id: &String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), Box<dyn Error>> {
+pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
     let permissions = verify_permissions(&path, false);
     if permissions.is_err() {
         return Err(permissions.err().unwrap());

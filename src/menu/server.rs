@@ -1,3 +1,4 @@
+use crate::broadcast::DiscoveredDevice;
 use crate::challenge::DefaultChallengeManager;
 use crate::client::DefaultClientManager;
 use crate::consts::{CommonThreadError, DeviceId, DEFAULT_LISTENING_PORT};
@@ -9,10 +10,12 @@ use crate::server::DefaultServer;
 use crate::state::InternalState;
 use crate::{broadcast, challenge, client, server};
 use log::info;
-use std::collections::LinkedList;
+use std::collections::{HashMap, LinkedList};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::thread;
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot::channel;
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct ServerAction {
@@ -122,10 +125,17 @@ struct ListKnownDevices {}
 impl Step for ListKnownDevices {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let device_manager = Arc::clone(&DefaultDeviceManager);
-        let known_devices = {
+        let (tx, mut rx) = channel::<HashMap<String, DiscoveredDevice>>();
+        thread::spawn(move || {
             let rt = Runtime::new().expect("Failed to create Tokio runtime");
-            rt.block_on(device_manager.known_devices.read()).clone()
-        };
+
+            let devices = rt.block_on(async {
+                let mtx = device_manager.known_devices.read().await;
+                mtx.clone()
+            });
+            let _ = tx.send(devices);
+        });
+        let known_devices = rx.try_recv().unwrap_or_default();
 
         println!("\n--- Known Devices ({} total) ---", known_devices.len());
         for (id, device) in known_devices.iter() {

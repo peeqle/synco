@@ -6,6 +6,7 @@ use std::collections::LinkedList;
 use std::io;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use tokio::runtime::Runtime;
 
 type DStep = Box<dyn Step + Send + Sync>;
@@ -77,15 +78,25 @@ impl Step for SelectFileStep {
         let mut valid_file = false;
 
         while !valid_file {
-            print!("Enter file path: ");
+            println!("Enter file path: ");
             let path_input = read_user_input()?;
             let path = PathBuf::from(path_input);
 
-            let rt = Runtime::new().expect("Failed to create Tokio runtime");
-            if let Err(e) = rt.block_on(attach(path)) {
-                error!("Cannot perform file attachment! \n {}", e);
-            } else {
-                valid_file = true;
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = Runtime::new().expect("Failed to create Tokio runtime");
+                let res = rt.block_on(attach(path));
+                let _ = tx.send(res);
+            });
+
+            match rx.recv() {
+                Ok(Ok(())) => {
+                    valid_file = true;
+                }
+                Ok(Err(e)) => {
+                    error!("Cannot perform file attachment! \n {}", e);
+                }
+                Err(_) => {}
             }
         }
         Ok(false)
@@ -107,25 +118,30 @@ impl Step for SelectFileStep {
 struct DisplayFilesStep {}
 impl Step for DisplayFilesStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        let rt = Runtime::new().expect("Failed to create Tokio runtime");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = Runtime::new().expect("Failed to create Tokio runtime");
+            let result = rt.block_on(async {
+                let files = Files.clone();
+                let mtx_guard = files.lock().await;
 
-        let result = rt.block_on(async {
-            let files = Files.clone();
-            let mtx_guard = files.lock().await;
+                let formatted_strings: Vec<String> = mtx_guard
+                    .iter()
+                    .map(|(_, file)| {
+                        format!("{}\t{:?}\t{}", file.id, file.path, file.current_hash)
+                    })
+                    .collect();
 
-            let formatted_strings: Vec<String> = mtx_guard
-                .iter()
-                .map(|(_, file)| {
-                    format!("{}\t{:?}\t{}", file.id, file.path, file.current_hash)
-                })
-                .collect();
-
-            formatted_strings
+                formatted_strings
+            });
+            let _ = tx.send(result);
         });
 
-        println!("Attached files:");
-        for i in result {
-            println!("{}", i);
+        if let Ok(result) = rx.recv() {
+            println!("Attached files:");
+            for i in result {
+                println!("{}", i);
+            }
         }
 
         Ok(false)
@@ -150,9 +166,19 @@ impl Step for RemoveFileStep {
         print!("Select file to remove: ");
         let file_id = read_user_input()?;
 
-        let rt = Runtime::new().expect("Failed to create Tokio runtime");
-        if let Err(e) = rt.block_on(remove(&file_id)) {
-            return Err(Box::new(Error::new(ErrorKind::Other, format!("Cannot perform file attachment! \n {}", e))));
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = Runtime::new().expect("Failed to create Tokio runtime");
+            let res = rt.block_on(remove(&file_id));
+            let _ = tx.send(res);
+        });
+
+        match rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(Box::new(Error::new(ErrorKind::Other, format!("Cannot perform file attachment! \n {}", e))))
+            }
+            Err(_) => {}
         }
         Ok(false)
     }

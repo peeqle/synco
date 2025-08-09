@@ -57,14 +57,6 @@ pub fn display_menu() {
                 println!("Cannot read user input!");
             }
         }
-        #[cfg(unix)]
-        {
-            std::process::Command::new("clear").status().unwrap();
-        }
-        #[cfg(windows)]
-        {
-            std::process::Command::new("cls").status().unwrap();
-        }
     }
 }
 
