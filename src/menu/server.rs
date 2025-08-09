@@ -2,23 +2,17 @@ use crate::challenge::DefaultChallengeManager;
 use crate::client::DefaultClientManager;
 use crate::consts::{CommonThreadError, DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
-use crate::diff::{attach, Files};
 use crate::keychain::server::generate_root_ca;
 use crate::machine_utils::get_local_ip;
-use crate::menu::{Action, Step};
+use crate::menu::{read_user_input, Action, Step};
 use crate::server::DefaultServer;
 use crate::state::InternalState;
 use crate::{broadcast, challenge, client, server};
-use log::{error, info};
+use log::info;
 use std::collections::LinkedList;
-use std::io;
-use std::io::Read;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio::time::sleep;
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct ServerAction {
@@ -28,8 +22,10 @@ pub struct ServerAction {
 
 impl Default for ServerAction {
     fn default() -> Self {
-        let start_server_step = Box::new(StartServerStep {}) as DStep;
-        let steps: LinkedList<DStep> = LinkedList::from([start_server_step]);
+        let steps: LinkedList<DStep> = LinkedList::from([
+            Box::new(StartServerStep {}) as DStep,
+            Box::new(ListKnownDevices {}) as DStep,
+        ]);
 
         ServerAction {
             current_step: None,
@@ -43,22 +39,43 @@ impl Action for ServerAction {
         "server_action".to_string()
     }
 
-    fn act(&self) -> Box<dyn Fn() -> Result<(), CommonThreadError> + Send + Sync> {
-        Box::new(|| {
-            let start_step = StartServerStep {};
-            start_step.action()
-        })
-    }
-
     fn render(&self) {
         println!("Network management");
+    }
+
+    fn act(&self) -> Box<dyn Fn() -> Result<bool, CommonThreadError> + Send + Sync> {
+        Box::new(|| {
+            let steps: Vec<DStep> = vec![
+                Box::new(StartServerStep {}),
+                Box::new(ListKnownDevices {}),
+            ];
+
+            println!("Select option:");
+            for (id, x) in steps.iter().enumerate() {
+                println!("\t{} {}", id, x.display());
+            }
+
+            match read_user_input() {
+                Ok(val) => match val.parse::<usize>() {
+                    Ok(n) if n < steps.len() => steps[n].action(),
+                    _ => {
+                        println!("Unknown option");
+                        Ok(false)
+                    }
+                },
+                Err(_) => {
+                    println!("Cannot read user input");
+                    Ok(false)
+                }
+            }
+        })
     }
 }
 
 
 struct StartServerStep {}
 impl Step for StartServerStep {
-    fn action(&self) -> Result<(), CommonThreadError> {
+    fn action(&self) -> Result<bool, CommonThreadError> {
         let device_manager_arc = Arc::clone(&DefaultDeviceManager);
         let default_server = Arc::clone(&DefaultServer);
         let device_manager_arc_for_join = device_manager_arc.clone();
@@ -68,23 +85,24 @@ impl Step for StartServerStep {
         let challenge_manager = DefaultChallengeManager.clone();
         let client_manager = DefaultClientManager.clone();
 
-        let rt = Runtime::new().expect("Failed to create Tokio runtime");
-
-        rt.spawn(async move {
-            let _ = tokio::join!(
-                tokio::spawn(broadcast::start_broadcast_announcer(
-                    DEFAULT_LISTENING_PORT,
-                    net_addr
-                )),
-                tokio::spawn(broadcast::start_listener()),
-                tokio::spawn(async move { server::run(default_server.clone()).await }),
-                tokio::spawn(async move { challenge::run(challenge_manager.clone()).await }),
-                tokio::spawn(async move { client::run(client_manager.clone()).await }),
-                tokio::spawn(async move { device_manager_arc_for_join.start().await })
-            );
+        std::thread::spawn(move || {
+            let rt = Runtime::new().expect("Failed to create Tokio runtime");
+            rt.block_on(async move {
+                let _ = tokio::join!(
+                    tokio::spawn(broadcast::start_broadcast_announcer(
+                        DEFAULT_LISTENING_PORT,
+                        net_addr
+                    )),
+                    tokio::spawn(broadcast::start_listener()),
+                    tokio::spawn(async move { server::run(default_server.clone()).await }),
+                    tokio::spawn(async move { challenge::run(challenge_manager.clone()).await }),
+                    tokio::spawn(async move { client::run(client_manager.clone()).await }),
+                    tokio::spawn(async move { device_manager_arc_for_join.start().await })
+                );
+            });
         });
 
-        Ok(())
+        Ok(true)
     }
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
@@ -102,7 +120,7 @@ impl Step for StartServerStep {
 
 struct ListKnownDevices {}
 impl Step for ListKnownDevices {
-    fn action(&self) -> Result<(), CommonThreadError> {
+    fn action(&self) -> Result<bool, CommonThreadError> {
         let device_manager = Arc::clone(&DefaultDeviceManager);
         let known_devices = {
             let rt = Runtime::new().expect("Failed to create Tokio runtime");
@@ -118,7 +136,7 @@ impl Step for ListKnownDevices {
         }
         println!("---------------------------------\n");
 
-        Ok(())
+        Ok(false)
     }
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {

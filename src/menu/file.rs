@@ -3,11 +3,9 @@ use crate::diff::{attach, remove, Files};
 use crate::menu::{read_user_input, Action, Step};
 use log::error;
 use std::collections::LinkedList;
-use std::fmt::format;
 use std::io;
-use std::io::{Error, ErrorKind, Read};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::io::{Error, ErrorKind};
+use std::path::PathBuf;
 use tokio::runtime::Runtime;
 
 type DStep = Box<dyn Step + Send + Sync>;
@@ -22,7 +20,7 @@ impl Default for FileAction {
             [
                 Box::new(SelectFileStep {}) as DStep,
                 Box::new(RemoveFileStep {}) as DStep,
-                Box::new(DisplayFilesStep {}) as DStep
+                Box::new(DisplayFilesStep {}) as DStep,
             ]
         );
 
@@ -40,15 +38,34 @@ impl Action for FileAction {
 
     fn render(&self) {
         println!("File management");
-        for (id, x) in self.steps.iter().enumerate() {
-            println!("\t{} {:?}", id, x.display());
-        }
     }
 
-    fn act(&self) -> Box<dyn Fn() -> Result<(), CommonThreadError> + Send + Sync> {
+    fn act(&self) -> Box<dyn Fn() -> Result<bool, CommonThreadError> + Send + Sync> {
         Box::new(|| {
-            let select_step = SelectFileStep {};
-            select_step.action()
+            let steps: Vec<DStep> = vec![
+                Box::new(SelectFileStep {}),
+                Box::new(RemoveFileStep {}),
+                Box::new(DisplayFilesStep {}),
+            ];
+
+            println!("Select option:");
+            for (id, x) in steps.iter().enumerate() {
+                println!("\t{} {}", id, x.display());
+            }
+
+            match read_user_input() {
+                Ok(val) => match val.parse::<usize>() {
+                    Ok(n) if n < steps.len() => steps[n].action(),
+                    _ => {
+                        println!("Unknown option");
+                        Ok(false)
+                    }
+                },
+                Err(_) => {
+                    println!("Cannot read user input");
+                    Ok(false)
+                }
+            }
         })
     }
 }
@@ -56,27 +73,22 @@ impl Action for FileAction {
 
 struct SelectFileStep {}
 impl Step for SelectFileStep {
-    fn action(&self) -> Result<(), CommonThreadError> {
+    fn action(&self) -> Result<bool, CommonThreadError> {
         let mut valid_file = false;
 
         while !valid_file {
-            let mut path_input = String::new();
-            io::stdin()
-                .read_line(&mut path_input)
-                .expect("Cannot read th input");
+            print!("Enter file path: ");
+            let path_input = read_user_input()?;
+            let path = PathBuf::from(path_input);
 
-            {
-                let path = PathBuf::from(path_input);
-
-                let rt = Runtime::new().expect("Failed to create Tokio runtime");
-                if let Err(e) = rt.block_on(attach(path)) {
-                    error!("Cannot perform file attachment! \n {}", e);
-                } else {
-                    valid_file = true;
-                }
+            let rt = Runtime::new().expect("Failed to create Tokio runtime");
+            if let Err(e) = rt.block_on(attach(path)) {
+                error!("Cannot perform file attachment! \n {}", e);
+            } else {
+                valid_file = true;
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
@@ -94,7 +106,7 @@ impl Step for SelectFileStep {
 
 struct DisplayFilesStep {}
 impl Step for DisplayFilesStep {
-    fn action(&self) -> Result<(), CommonThreadError> {
+    fn action(&self) -> Result<bool, CommonThreadError> {
         let rt = Runtime::new().expect("Failed to create Tokio runtime");
 
         let result = rt.block_on(async {
@@ -116,7 +128,7 @@ impl Step for DisplayFilesStep {
             println!("{}", i);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
@@ -124,17 +136,17 @@ impl Step for DisplayFilesStep {
     }
 
     fn render(&self) {
-        print!("Select files to attach");
+        print!("Display attached files");
     }
 
     fn display(&self) -> &str {
-        "Select files to attach"
+        "Display attached files"
     }
 }
 
 struct RemoveFileStep {}
 impl Step for RemoveFileStep {
-    fn action(&self) -> Result<(), CommonThreadError> {
+    fn action(&self) -> Result<bool, CommonThreadError> {
         print!("Select file to remove: ");
         let file_id = read_user_input()?;
 
@@ -142,7 +154,7 @@ impl Step for RemoveFileStep {
         if let Err(e) = rt.block_on(remove(&file_id)) {
             return Err(Box::new(Error::new(ErrorKind::Other, format!("Cannot perform file attachment! \n {}", e))));
         }
-        Ok(())
+        Ok(false)
     }
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {

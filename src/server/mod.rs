@@ -31,7 +31,6 @@ use tokio::task;
 use tokio::task::spawn_blocking;
 use tokio_rustls::TlsStream;
 
-pub(crate) mod tls_utils;
 pub(crate) mod model;
 
 lazy_static! {
