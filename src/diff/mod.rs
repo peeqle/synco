@@ -1,27 +1,27 @@
-mod util;
 mod consts;
+mod util;
 
-use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
+use crate::consts::{BUFFER_SIZE, CommonThreadError, DeviceId, of_type};
+use crate::diff::SnapshotAction::Update;
 use crate::diff::consts::MAX_FILE_SIZE_BYTES;
 use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
-use crate::diff::SnapshotAction::Update;
-use crate::utils::get_default_application_dir;
 use crate::utils::DirType::Cache;
+use crate::utils::get_default_application_dir;
 use blake3::Hash;
 use lazy_static::lazy_static;
 use mockall::Any;
 use notify::event::{DataChange, ModifyKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fs::{copy, remove_file};
 use std::io::{BufRead, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
@@ -29,6 +29,8 @@ use uuid::Uuid;
 
 lazy_static! {
     pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> =
         Arc::new(Mutex::new(HashMap::new()));
 }
 
@@ -48,10 +50,66 @@ pub struct FileEntity {
     notify: Arc<Notify>,
 }
 
-pub async fn add_file_request(device_id: &String,
-                              requesting_system_id: String,
-                              requesting_system_path: String,
-                              requesting_system_hash: String) -> Result<(), CommonThreadError> {
+#[derive(Clone)]
+pub struct SynchroPoint {
+    pub path: PathBuf,
+    pub enabled: bool,
+}
+
+pub mod point {
+    use crate::consts::CommonThreadError;
+    use crate::diff::{Points, SynchroPoint};
+    use std::collections::hash_map::Entry;
+    use std::path::PathBuf;
+
+    pub async fn update_point(
+        file_extension: String,
+        path: Option<PathBuf>,
+        enabled: Option<bool>,
+    ) -> Result<(), CommonThreadError> {
+        let points_manager = Points.clone();
+        let mut mtx = points_manager.lock().await;
+
+        match mtx.entry(file_extension.clone()) {
+            Entry::Occupied(mut ent) => {
+                let ent_mut = ent.get_mut();
+                if let Some(path_opt) = path {
+                    ent_mut.path = path_opt;
+                }
+                if let Some(enabled_opt) = enabled {
+                    ent_mut.enabled = enabled_opt;
+                }
+            }
+            Entry::Vacant(_) => {
+                if let Some(path_opt) = path {
+                    mtx.insert(
+                        file_extension,
+                        SynchroPoint {
+                            path: path_opt,
+                            enabled: enabled.unwrap_or(true),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn remove_point(file_extension: String) -> Result<(), CommonThreadError> {
+        let points_manager = Points.clone();
+        let mut mtx = points_manager.lock().await;
+
+        mtx.remove(&file_extension);
+        Ok(())
+    }
+}
+
+pub async fn add_file_request(
+    device_id: &String,
+    requesting_system_id: String,
+    requesting_system_path: String,
+    requesting_system_hash: String,
+) -> Result<(), CommonThreadError> {
     let file_manager = Files.clone();
     let mut mtx = file_manager.lock().await;
 
@@ -80,8 +138,7 @@ pub async fn get_seeding_files() -> Vec<String> {
     let files = Files.clone();
     let mtx = files.lock().await;
 
-    mtx.iter().map(|(x, y)| y.id.clone())
-        .collect()
+    mtx.iter().map(|(x, y)| y.id.clone()).collect()
 }
 
 pub async fn remove(file_id: &String) -> Result<(), CommonThreadError> {
@@ -98,7 +155,10 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
         return Err(permissions.err().unwrap());
     }
     if !verify_file_size(&path) {
-        return Err(of_type(&format!("File is too large, max is {}", MAX_FILE_SIZE_BYTES), ErrorKind::Other));
+        return Err(of_type(
+            &format!("File is too large, max is {}", MAX_FILE_SIZE_BYTES),
+            ErrorKind::Other,
+        ));
     }
 
     let file_manager = Files.clone();
@@ -107,21 +167,27 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
     let blake_filepath_hash = blake_digest(&path)?;
     match current_state.entry(blake3::hash(path.as_ref().as_os_str().as_bytes()).to_string()) {
         Entry::Occupied(entry) => {
-            println!("Recalculating hashes for {}", path.as_ref().to_str().unwrap());
+            println!(
+                "Recalculating hashes for {}",
+                path.as_ref().to_str().unwrap()
+            );
         }
         Entry::Vacant(_) => {
-            current_state.insert(blake_filepath_hash.to_string(), FileEntity {
-                id: Uuid::new_v4().to_string(),
-                path: PathBuf::from(path.as_ref()),
-                is_in_sync: Arc::new(AtomicBool::new(false)),
-                snapshot_path: None,
-                prev_hash: None,
-                current_hash: blake_filepath_hash,
-                main_node: DeviceId.clone(),
-                synced_with: vec![],
-                last_update: None,
-                notify: Arc::new(Notify::new()),
-            });
+            current_state.insert(
+                blake_filepath_hash.to_string(),
+                FileEntity {
+                    id: Uuid::new_v4().to_string(),
+                    path: PathBuf::from(path.as_ref()),
+                    is_in_sync: Arc::new(AtomicBool::new(false)),
+                    snapshot_path: None,
+                    prev_hash: None,
+                    current_hash: blake_filepath_hash,
+                    main_node: DeviceId.clone(),
+                    synced_with: vec![],
+                    last_update: None,
+                    notify: Arc::new(Notify::new()),
+                },
+            );
         }
     }
     Ok(())
@@ -174,8 +240,7 @@ pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
             if let Some(entry) = mtx.get_mut(&path_key) {
                 //send changes to node
 
-                snapshot(entry, Update)
-                    .expect("Cannot create file snapshot");
+                snapshot(entry, Update).expect("Cannot create file snapshot");
             }
         }
     });
@@ -184,23 +249,28 @@ pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
 pub async fn check_file_change(file: &FileEntity) -> RecommendedWatcher {
     let notify_future = Arc::clone(&file.notify);
     let file_path = file.path.clone();
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        match res {
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
             Ok(event) => {
-                if event.paths.contains(&file_path) && (matches!(event.kind, notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))) ||
-                    matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any))) {
+                if event.paths.contains(&file_path)
+                    && (matches!(
+                        event.kind,
+                        notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))
+                    ) || matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any)))
+                {
                     notify_future.notify_waiters();
                 }
             }
             Err(e) => eprintln!("{:?}", e),
-        }
-    }).expect("Cannot build watcher");
+        })
+        .expect("Cannot build watcher");
 
-    watcher.watch(&file.path.clone(), RecursiveMode::NonRecursive).expect("Cannot watch");
+    watcher
+        .watch(&file.path.clone(), RecursiveMode::NonRecursive)
+        .expect("Cannot watch");
 
     watcher
 }
-
 
 /**
 For now consider that a bullshit, cause idk how to efficiently compare two+ distinct, fairly similar, but completely different files in the network
@@ -234,8 +304,8 @@ pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), Com
 mod diff_test {
     use crate::consts::DEFAULT_TEST_SUBDIR;
     use crate::diff::util::blake_digest;
-    use crate::utils::get_default_application_dir;
     use crate::utils::DirType::Action;
+    use crate::utils::get_default_application_dir;
     use std::fs;
     use std::fs::File;
     use std::io::{BufWriter, Write};

@@ -1,9 +1,11 @@
 mod file;
 mod server;
+mod sync;
 
 use crate::consts::CommonThreadError;
 use crate::menu::file::FileAction;
 use crate::menu::server::ServerAction;
+use crate::menu::sync::SyncAction;
 use lazy_static::lazy_static;
 use serde::de::Error;
 use std::collections::BTreeMap;
@@ -14,7 +16,8 @@ lazy_static! {
         let mut map = BTreeMap::new();
         map.insert(0, Box::new(FileAction::default()) as Box<dyn Action + Send + Sync>);
         map.insert(1, Box::new(ServerAction::default()) as Box<dyn Action + Send + Sync>);
-        
+        map.insert(2, Box::new(SyncAction::default()) as Box<dyn Action + Send + Sync>);
+
         map
     };
 }

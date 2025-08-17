@@ -40,7 +40,24 @@ pub fn device_id() -> Option<String> {
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
-pub async fn send_to<T>(connection: Arc<Mutex<T>>, request: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>>
+pub async fn send_framed<T>(
+    connection: Arc<Mutex<T>>,
+    request: Vec<u8>,
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    T: AsyncWrite + Unpin + Send + 'static,
+{
+    let mut mtx = connection.lock().await;
+
+    mtx.write_all(&request.len().to_le_bytes()).await?;
+    mtx.write_all(&request).await?;
+    Ok(())
+}
+
+pub async fn send_to<T>(
+    connection: Arc<Mutex<T>>,
+    request: Vec<u8>,
+) -> Result<(), Box<dyn Error + Send + Sync>>
 where
     T: AsyncWrite + Unpin + Send + 'static,
 {
@@ -65,19 +82,16 @@ pub enum DirType {
 
 pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
     let mut app_data_dir = match dir_type {
-        DirType::Action => {
-            dirs::data_dir()
-        }
-        DirType::Cache => {
-            dirs::cache_dir()
-        }
-    }.ok_or_else(|| {
+        DirType::Action => dirs::data_dir(),
+        DirType::Cache => dirs::cache_dir(),
+    }
+    .ok_or_else(|| {
         io::Error::new(
             ErrorKind::Unsupported,
             "Could not determine application data directory for this OS.",
         )
     })
-        .unwrap();
+    .unwrap();
     app_data_dir.push(DEFAULT_APP_SUBDIR);
 
     if !fs::exists(&app_data_dir).unwrap() {
@@ -203,7 +217,7 @@ mod test {
             &enc_response.2,
             passphrase.as_bytes(),
         )
-            .expect("Cannot decrypt");
+        .expect("Cannot decrypt");
 
         println!("Decrypted data: {:?}", decr_response);
         assert_eq!(decr_response.as_slice(), data_to_encrypt);
