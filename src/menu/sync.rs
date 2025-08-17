@@ -4,10 +4,10 @@ use crate::diff::{attach, remove, Files, Points};
 use crate::menu::{read_user_input, Action, Step};
 use log::error;
 use std::collections::LinkedList;
-use std::io;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::{fs, io};
 use tokio::runtime::{Handle, Runtime};
 
 type DStep = Box<dyn Step + Send + Sync>;
@@ -70,19 +70,19 @@ impl Action for SyncAction {
     }
 }
 
-struct UpdateSyncPoint {}
+struct UpdateSyncPoint {
+}
 impl Step for UpdateSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
+        let handle = Handle::current();
         let mut valid_input = false;
 
         while !valid_input {
-            println!("Enter synchronization dir path: ");
+            println!("Enter synchronization dir ABSOLUTE path: ");
             let path_input = read_user_input()?;
             let path = PathBuf::from(path_input);
 
-            if !&path.exists() {
-                println!("Cannot resolve provided path: {:?}", path);
-            } else {
+            let mut point_creation = |path: PathBuf| -> Result<(), CommonThreadError> {
                 println!("Enable point[y/n]:");
                 let enabled_input = read_user_input()?;
 
@@ -98,32 +98,41 @@ impl Step for UpdateSyncPoint {
                 }
 
                 let (tx, rx) = mpsc::channel::<Result<(), CommonThreadError>>();
-                std::thread::spawn(move || {
-                    let handle = Handle::current();
 
-                    let runtime_handle_update = |ext, path, enabled_input: &String| {
-                        tokio::task::block_in_place(|| {
-                            handle
-                                .block_on(update_point(
-                                    ext,
-                                    Some(path),
-                                    match enabled_input.is_empty() {
-                                        true => Some(true),
-                                        false => Some(enabled_input.to_ascii_lowercase() == "y"),
-                                    },
-                                ))
-                                .expect("TODO: panic message");
-                        });
-                    };
+                let handle_clone = handle.clone();
+                handle.spawn_blocking(move || {
+                    let result = handle_clone.block_on(async {
+                        let runtime_handle_update = |ext, path, enabled_input: String| {
+                            update_point(
+                                ext,
+                                Some(path),
+                                match enabled_input.is_empty() {
+                                    true => Some(true),
+                                    false => Some(enabled_input.to_ascii_lowercase() == "y"),
+                                },
+                            )
+                        };
 
-                    if cooked_extensions.is_empty() {
-                        runtime_handle_update("ALL".to_string(), path.clone(), &enabled_input);
-                    } else {
-                        for ext in cooked_extensions {
-                            runtime_handle_update(ext, path.clone(), &enabled_input);
+                        if cooked_extensions.is_empty() {
+                            runtime_handle_update(
+                                "ALL".to_string(),
+                                path.clone(),
+                                enabled_input.clone(),
+                            )
+                                .await
+                                .expect("Cannot send update for Point");
+                            let _ = tx.send(Ok(()));
+                        } else {
+                            for ext in cooked_extensions {
+                                runtime_handle_update(ext, path.clone(), enabled_input.clone())
+                                    .await
+                                    .expect("Cannot send update for Point");
+                            }
+                            let _ = tx.send(Ok(()));
                         }
-                    }
-                    let _ = tx.send(Ok(()));
+                        Ok(())
+                    });
+                    let _ = tx.send(result);
                 });
 
                 match rx.recv() {
@@ -135,6 +144,18 @@ impl Step for UpdateSyncPoint {
                     }
                     Err(_) => {}
                 }
+                Ok(())
+            };
+
+            if !&path.exists() || !&path.is_absolute() {
+                println!("Cannot resolve provided path: {:?}", path);
+                println!("Create dirs at {:?} ?[y/n]", path);
+                if read_user_input()?.to_ascii_lowercase() == "y" {
+                    fs::create_dir_all(&path)?;
+                    point_creation(path.clone())?;
+                }
+            } else {
+                point_creation(path.clone())?;
             }
         }
         Ok(false)
@@ -191,8 +212,10 @@ impl Step for RemoveSyncPoint {
         let file_extension_to_remove = read_user_input()?;
         if file_extension_to_remove.is_empty() {
             println!("Missclick bud...");
-        }else {
-            tokio::task::block_in_place(|| handle.block_on(remove_point(file_extension_to_remove)))?;
+        } else {
+            tokio::task::block_in_place(|| {
+                handle.block_on(remove_point(file_extension_to_remove))
+            })?;
         }
 
         Ok(false)
