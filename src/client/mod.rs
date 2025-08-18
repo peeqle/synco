@@ -7,8 +7,9 @@ use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
+use crate::tcp_utils::send_framed;
 use crate::utils::DirType::Action;
-use crate::utils::{get_default_application_dir, get_server_cert_storage, load_cas, send_to};
+use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use lazy_static::lazy_static;
 use log::{error, info};
 use rustls::client::WebPkiServerVerifier;
@@ -384,7 +385,7 @@ async fn start_client_request_listener(server_id: &String, mut client_receiver: 
                     while let Some(message) = client_receiver.recv().await {
                         let serialized = serde_json::to_vec(&message)
                             .expect("Cannot serialize");
-                        send_to(connection_arc.clone(), serialized).await
+                        send_framed(connection_arc.clone(), serialized).await
                             .expect(&format!("Cannot send request to the server: {:?}", message));
                     }
                 });

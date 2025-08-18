@@ -40,41 +40,6 @@ pub fn device_id() -> Option<String> {
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
-pub async fn send_framed<T>(
-    connection: Arc<Mutex<T>>,
-    request: Vec<u8>,
-) -> Result<(), Box<dyn Error + Send + Sync>>
-where
-    T: AsyncWrite + Unpin + Send + 'static,
-{
-    let mut mtx = connection.lock().await;
-
-    mtx.write_all(&request.len().to_le_bytes()).await?;
-    mtx.write_all(&request).await?;
-    Ok(())
-}
-
-pub async fn send_to<T>(
-    connection: Arc<Mutex<T>>,
-    request: Vec<u8>,
-) -> Result<(), Box<dyn Error + Send + Sync>>
-where
-    T: AsyncWrite + Unpin + Send + 'static,
-{
-    let mut conn_guard = connection.lock().await;
-
-    if let Err(e) = conn_guard.write_all(&request).await {
-        return Err(Box::new(io::Error::new(
-            ErrorKind::Interrupted,
-            format!("Failed to write response: {}", e),
-        )));
-    }
-
-    conn_guard.flush().await?;
-
-    Ok(())
-}
-
 pub enum DirType {
     Action,
     Cache,

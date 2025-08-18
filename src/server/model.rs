@@ -143,12 +143,7 @@ pub enum ServerRequest {
     },
     AcceptConnection(String),
     RejectConnection(String),
-    FileOperation {
-        id: String,
-        path: String,
-        hash: String,
-        action: Crud
-    },
+
     SeedingFiles
 }
 

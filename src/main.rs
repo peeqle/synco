@@ -20,6 +20,7 @@ mod server;
 mod state;
 mod utils;
 mod menu;
+mod tcp_utils;
 
 #[tokio::main]
 async fn main() -> Result<(), CommonThreadError> {

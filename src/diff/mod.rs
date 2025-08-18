@@ -15,7 +15,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::error::Error;
-use std::fs::{copy, remove_file};
+use std::fs::{self, copy, remove_file};
+use std::io;
 use std::io::{BufRead, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,8 @@ lazy_static! {
 pub struct FileEntity {
     pub id: String,
     pub path: PathBuf,
+    pub filename: String,
+    pub size: u64,
     snapshot_path: Option<PathBuf>,
     prev_hash: Option<Hash>,
     pub current_hash: Hash,
@@ -104,36 +107,6 @@ pub mod point {
     }
 }
 
-pub async fn add_file_request(
-    device_id: &String,
-    requesting_system_id: String,
-    requesting_system_path: String,
-    requesting_system_hash: String,
-) -> Result<(), CommonThreadError> {
-    let file_manager = Files.clone();
-    let mut mtx = file_manager.lock().await;
-
-    match mtx.entry(requesting_system_hash.clone()) {
-        Entry::Occupied(_) => {}
-        Entry::Vacant(e) => {
-            e.insert(FileEntity {
-                id: requesting_system_id,
-                path: PathBuf::from(&requesting_system_path),
-                snapshot_path: None,
-                prev_hash: None,
-                current_hash: Hash::from_str(&requesting_system_hash)?,
-                is_in_sync: Arc::new(AtomicBool::new(false)),
-                main_node: device_id.clone(),
-                synced_with: vec![],
-                last_update: None,
-                notify: Arc::new(Notify::new()),
-            });
-        }
-    }
-
-    Ok(())
-}
-
 pub async fn get_seeding_files() -> Vec<String> {
     let files = Files.clone();
     let mtx = files.lock().await;
@@ -161,6 +134,8 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
         ));
     }
 
+    let metadata = fs::metadata(&path)?;
+
     let file_manager = Files.clone();
     let mut current_state = file_manager.lock().await;
 
@@ -177,6 +152,8 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
                 blake_filepath_hash.to_string(),
                 FileEntity {
                     id: Uuid::new_v4().to_string(),
+                    filename: String::from(PathBuf::from(path.as_ref()).file_name().unwrap().to_str().unwrap()),
+                    size: metadata.len(),
                     path: PathBuf::from(path.as_ref()),
                     is_in_sync: Arc::new(AtomicBool::new(false)),
                     snapshot_path: None,

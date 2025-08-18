@@ -4,13 +4,13 @@ use crate::challenge::{
 };
 use crate::consts::{of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::diff::{add_file_request, attach, get_seeding_files};
+use crate::diff::{attach, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
 use crate::server::model::{Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::utils::{get_server_cert_storage, send_to};
+use crate::tcp_utils::send_framed;
 use crate::CommonThreadError;
 use lazy_static::lazy_static;
 use log::{error, info};
@@ -177,18 +177,6 @@ async fn handle_server_request(sender_id: &String, buffer: Vec<u8>, sender: Send
                 }
                 ServerRequest::AcceptConnection(_) => {}
                 ServerRequest::RejectConnection(_) => {}
-                ServerRequest::FileOperation { id, path, hash, action } => {
-                    match action {
-                        _ => {
-                            match add_file_request(sender_id, id, path, hash).await {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    error!("{:?}", err);
-                                }
-                            };
-                        }
-                    }
-                }
                 ServerRequest::SeedingFiles => {
                     sender.send(ServerResponse::SeedingFiles {
                         files_data: get_seeding_files().await
@@ -264,7 +252,7 @@ async fn send_response_to_client(
     response: ServerResponse,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let serialized = serde_json::to_vec(&response)?;
-    send_to(connection, serialized).await
+    send_framed(connection, serialized).await
 }
 
 async fn send_challenge(
