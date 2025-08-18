@@ -25,7 +25,7 @@ where
     let serialized_metadata = serde_json::to_vec(&metadata)?;
 
     let mut mtx = connection.lock().await;
-    mtx.write_all(&(serialized_metadata.len() as u64).to_ne_bytes()).await?;
+    mtx.write_all(&(serialized_metadata.len() as u64).to_le_bytes()).await?;
     mtx.write_all(&serialized_metadata).await?;
 
     let mut buffer_chunk = [0u8; 8192];
@@ -51,7 +51,7 @@ where
 {
     let mut mtx = connection.lock().await;
 
-    mtx.write_all(&(request.len() as u64).to_ne_bytes()).await?;
+    mtx.write_all(&(request.len() as u64).to_le_bytes()).await?;
     mtx.write_all(&request).await?;
 
     Ok(())
@@ -66,7 +66,7 @@ where
     let mut len_bytes = [0u8; 8];
     mtx.read_exact(&mut len_bytes).await?;
 
-    let len = u64::from_ne_bytes(len_bytes) as usize;
+    let len = u64::from_le_bytes(len_bytes) as usize;
 
     if len > 10 * 1024 * 1024 {
         return Err(Box::new(io::Error::new(
