@@ -357,8 +357,10 @@ fn server_response_listener(peer: &ClientTcpPeer, server_id: String) {
                                 file_id, size
                             } => {
                                 if let Some(existing_file) = get_file(&file_id).await {
-                                    let file_writer = get_file_writer(&existing_file).await?;
-                                    receive_file_chunked(Arc::clone(&connection_reader), size, file_writer).await?;
+                                   if let Ok(file_writer) = get_file_writer(&existing_file).await {
+                                        receive_file_chunked(Arc::clone(&connection_reader), size, file_writer).await
+                                            .expect(&format!("Cannot receive file {}", file_id));
+                                    }
                                 }
                             }
                             ServerResponse::Error { .. } => {}
