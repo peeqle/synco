@@ -1,28 +1,26 @@
 mod consts;
 mod util;
 
-use crate::consts::{BUFFER_SIZE, CommonThreadError, DeviceId, of_type};
-use crate::diff::SnapshotAction::Update;
+use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
 use crate::diff::consts::MAX_FILE_SIZE_BYTES;
 use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
-use crate::utils::DirType::Cache;
+use crate::diff::SnapshotAction::Update;
 use crate::utils::get_default_application_dir;
+use crate::utils::DirType::Cache;
 use blake3::Hash;
 use lazy_static::lazy_static;
 use mockall::Any;
 use notify::event::{DataChange, ModifyKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, copy, remove_file};
-use std::io;
-use std::io::{BufRead, ErrorKind, Read};
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
@@ -33,6 +31,13 @@ lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> =
         Arc::new(Mutex::new(HashMap::new()));
+}
+
+pub async fn get_file (file_id: &String) -> Option<FileEntity>
+{
+    let file_manager = Arc::clone(&Files);
+    let mtx = file_manager.lock().await;
+    mtx.get(file_id).cloned()
 }
 
 #[derive(Clone)]
@@ -152,7 +157,13 @@ pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
                 blake_filepath_hash.to_string(),
                 FileEntity {
                     id: Uuid::new_v4().to_string(),
-                    filename: String::from(PathBuf::from(path.as_ref()).file_name().unwrap().to_str().unwrap()),
+                    filename: String::from(
+                        PathBuf::from(path.as_ref())
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap(),
+                    ),
                     size: metadata.len(),
                     path: PathBuf::from(path.as_ref()),
                     is_in_sync: Arc::new(AtomicBool::new(false)),
@@ -281,8 +292,8 @@ pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), Com
 mod diff_test {
     use crate::consts::DEFAULT_TEST_SUBDIR;
     use crate::diff::util::blake_digest;
-    use crate::utils::DirType::Action;
     use crate::utils::get_default_application_dir;
+    use crate::utils::DirType::Action;
     use std::fs;
     use std::fs::File;
     use std::io::{BufWriter, Write};

@@ -1,11 +1,10 @@
-use crate::CommonThreadError;
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::{ChallengeEvent, DefaultChallengeManager, generate_challenge};
+use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
 use crate::consts::{
-    CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT, DeviceId, of_type,
+    of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT,
 };
-use crate::device_manager::{DefaultDeviceManager, get_device, get_device_by_socket};
-use crate::diff::{attach, get_seeding_files};
+use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
+use crate::diff::{attach, get_file, get_seeding_files, Files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
@@ -16,12 +15,13 @@ use crate::server::model::{
 };
 use crate::server::util::is_tcp_port_available;
 use crate::tcp_utils::{send_file_chunked, send_framed};
+use crate::CommonThreadError;
 use lazy_static::lazy_static;
 use log::{error, info};
-use rustls::{ServerConnection, server};
+use rustls::{server, ServerConnection};
 use std::error::Error;
 use std::fmt::format;
-use std::io::{ErrorKind, Write};
+use std::io::{read_to_string, ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -30,7 +30,7 @@ use std::{fs, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tokio_rustls::TlsStream;
@@ -107,6 +107,13 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                             .map(|(_id, device)| device.clone())
                             .last()
                     };
+
+                    handle_device_connection(
+                        server_arc.clone(),
+                        tls_stream,
+                        connecting_device_option,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -120,7 +127,7 @@ async fn handle_device_connection(
     server_arc: Arc<TcpServer>,
     tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
     connecting_device_option: Option<DiscoveredDevice>,
-) {
+) -> Result<(), CommonThreadError> {
     if let Some(connecting_device) = connecting_device_option {
         let (res_sender, mut res_receiver) = mpsc::channel::<ServerResponse>(100);
 
@@ -133,29 +140,9 @@ async fn handle_device_connection(
                     connection: Arc::new(Mutex::new(tls_stream)),
                     connection_status: Unknown,
                 });
+
             if device_connection.connection_status == Unknown {
-                let connection = device_connection.connection.clone();
-                let device_id = device_connection.device_id.clone();
-                tokio::spawn(async move {
-                    let mut buffer = Vec::new();
-                    loop {
-                        let mut locked_connection = connection.lock().await;
-                        match locked_connection.read(&mut buffer).await {
-                            Ok(_) => {
-                                handle_server_request(
-                                    &device_id,
-                                    buffer.clone(),
-                                    res_sender.clone(),
-                                )
-                                .await;
-                                AsyncWriteExt::flush(&mut buffer)
-                                    .await
-                                    .expect("Cannot flush");
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                });
+                open_device_connection(device_connection, res_sender).await;
             }
         }
 
@@ -181,42 +168,65 @@ async fn handle_device_connection(
             }
         });
     }
+    Ok(())
 }
 
-async fn handle_server_request(
-    sender_id: &String,
-    buffer: Vec<u8>,
+async fn open_device_connection(
+    device_connection: &mut ServerTcpPeer,
     sender: Sender<ServerResponse>,
-) {
-    match serde_json::from_slice::<ServerRequest>(&buffer) {
-        Ok(req) => match req {
-            ServerRequest::InitialRequest { .. } => {}
-            ServerRequest::ChallengeRequest { .. } => {}
-            ServerRequest::ChallengeResponse { .. } => {
-                if let Err(e) = DefaultChallengeManager
-                    .get_sender()
-                    .send(ChallengeEvent::ChallengeVerification {
-                        connection_response: req,
-                    })
-                    .await
-                {
-                    error!("Failed to send challenge verification: {}", e);
+) -> Result<(), CommonThreadError> {
+    let connection = device_connection.connection.clone();
+    let device_id = device_connection.device_id.clone();
+    tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        loop {
+            let mut locked_connection = connection.lock().await;
+            match locked_connection.read(&mut buffer).await {
+                Ok(_) => {
+                    match serde_json::from_slice::<ServerRequest>(&buffer) {
+                        Ok(req) => match req {
+                            ServerRequest::InitialRequest { .. } => {}
+                            ServerRequest::ChallengeRequest { .. } => {}
+                            ServerRequest::ChallengeResponse { .. } => {
+                                if let Err(e) = DefaultChallengeManager
+                                    .get_sender()
+                                    .send(ChallengeEvent::ChallengeVerification {
+                                        connection_response: req,
+                                    })
+                                    .await
+                                {
+                                    error!("Failed to send challenge verification: {}", e);
+                                }
+                            }
+                            ServerRequest::AcceptConnection(_) => {}
+                            ServerRequest::RejectConnection(_) => {}
+                            ServerRequest::FileRequest(file_id) => {
+                                if let Some(file) = get_file(&file_id).await  {
+                                    send_file_chunked(connection.clone(), &file).await
+                                        .expect("Error while sending file");
+                                }
+                            }
+                            ServerRequest::SeedingFiles => {
+                                sender
+                                    .send(ServerResponse::SeedingFiles {
+                                        files_data: get_seeding_files().await,
+                                    })
+                                    .await
+                                    .expect("Cannot send");
+                            }
+                        },
+                        Err(_) => {}
+                    }
+
+                    AsyncWriteExt::flush(&mut buffer)
+                        .await
+                        .expect("Cannot flush");
                 }
+                Err(_) => {}
             }
-            ServerRequest::AcceptConnection(_) => {}
-            ServerRequest::RejectConnection(_) => {}
-            ServerRequest::FileRequest(file_id) => send_file_chunked(),
-            ServerRequest::SeedingFiles => {
-                sender
-                    .send(ServerResponse::SeedingFiles {
-                        files_data: get_seeding_files().await,
-                    })
-                    .await
-                    .expect("Cannot send");
-            }
-        },
-        Err(_) => {}
-    }
+        }
+    });
+    Ok(())
 }
 
 async fn listen_actions(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
