@@ -1,20 +1,24 @@
+use crate::CommonThreadError;
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::{
-    generate_challenge, ChallengeEvent, DefaultChallengeManager,
+use crate::challenge::{ChallengeEvent, DefaultChallengeManager, generate_challenge};
+use crate::consts::{
+    CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT, DeviceId, of_type,
 };
-use crate::consts::{of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
-use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
+use crate::device_manager::{DefaultDeviceManager, get_device, get_device_by_socket};
 use crate::diff::{attach, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
-use crate::server::model::{Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::tcp_utils::send_framed;
-use crate::CommonThreadError;
+use crate::server::model::{
+    Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
+    TcpServer,
+};
+use crate::server::util::is_tcp_port_available;
+use crate::tcp_utils::{send_file_chunked, send_framed};
 use lazy_static::lazy_static;
 use log::{error, info};
-use rustls::{server, ServerConnection};
+use rustls::{ServerConnection, server};
 use std::error::Error;
 use std::fmt::format;
 use std::io::{ErrorKind, Write};
@@ -26,12 +30,13 @@ use std::{fs, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tokio_rustls::TlsStream;
 
 pub(crate) mod model;
+mod util;
 
 lazy_static! {
     pub static ref DefaultServer: Arc<TcpServer> = {
@@ -54,17 +59,22 @@ pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sy
 
 pub async fn start_signing_server() -> Result<(), CommonThreadError> {
     if !is_tcp_port_available(DEFAULT_SIGNING_SERVER_PORT).await {
-        panic!("Cannot start signing server on {}", DEFAULT_SIGNING_SERVER_PORT);
+        panic!(
+            "Cannot start signing server on {}",
+            DEFAULT_SIGNING_SERVER_PORT
+        );
     }
     let listener = TcpListener::bind(format!("0.0.0.0:{}", DEFAULT_SIGNING_SERVER_PORT)).await?;
 
-    info!("Signing server started at: {}", listener.local_addr()?.ip().to_string());
+    info!(
+        "Signing server started at: {}",
+        listener.local_addr()?.ip().to_string()
+    );
     loop {
         let (stream, socket) = listener.accept().await?;
         tokio::spawn(handle_ca_request(stream, socket));
     }
 }
-
 
 pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadError> {
     if !is_tcp_port_available(DEFAULT_SERVER_PORT).await {
@@ -97,58 +107,6 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                             .map(|(_id, device)| device.clone())
                             .last()
                     };
-
-                    if let Some(connecting_device) = connecting_device_option {
-                        let (res_sender, mut res_receiver) = mpsc::channel::<ServerResponse>(100);
-
-                        {
-                            let mut connected_devices_arc = server_arc.connected_devices.lock().await;
-                            let device_connection = connected_devices_arc.entry(connecting_device.device_id.clone())
-                                .or_insert_with(|| ServerTcpPeer {
-                                    device_id: connecting_device.device_id.clone(),
-                                    connection: Arc::new(Mutex::new(tls_stream)),
-                                    connection_status: Unknown,
-                                });
-                            if device_connection.connection_status == Unknown {
-                                let connection = device_connection.connection.clone();
-                                let device_id = device_connection.device_id.clone();
-                                tokio::spawn(async move {
-                                    let mut buffer = Vec::new();
-                                    loop {
-                                        let mut locked_connection = connection.lock().await;
-                                        match locked_connection.read(&mut buffer).await {
-                                            Ok(_) => {
-                                                handle_server_request(&device_id, buffer.clone(), res_sender.clone()).await;
-                                                AsyncWriteExt::flush(&mut buffer).await.expect("Cannot flush");
-                                            }
-                                            Err(_) => {}
-                                        }
-                                    };
-                                });
-                            }
-                        }
-
-                        let device_id = connecting_device.device_id.clone();
-                        tokio::spawn(async move {
-                            let connected_device_id = device_id.clone();
-
-                            let connection = {
-                                let connected_devices_arc = server_arc.connected_devices.lock().await;
-                                if let Some(con) = connected_devices_arc.get(&connected_device_id) {
-                                    con.connection.clone()
-                                } else {
-                                    return;
-                                }
-                            };
-
-                            loop {
-                                while let Some(message) = res_receiver.recv().await {
-                                    send_response_to_client(connection.clone(), message.clone()).await
-                                        .expect(&format!("Cannot send message to the client: {:?}", message));
-                                }
-                            }
-                        });
-                    }
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -158,32 +116,105 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
     }
 }
 
-async fn handle_server_request(sender_id: &String, buffer: Vec<u8>, sender: Sender<ServerResponse>) {
-    match serde_json::from_slice::<ServerRequest>(&buffer) {
-        Ok(req) => {
-            match req {
-                ServerRequest::InitialRequest { .. } => {}
-                ServerRequest::ChallengeRequest { .. } => {}
-                ServerRequest::ChallengeResponse { .. } => {
-                    if let Err(e) = DefaultChallengeManager
-                        .get_sender()
-                        .send(ChallengeEvent::ChallengeVerification {
-                            connection_response: req,
-                        })
-                        .await
-                    {
-                        error!("Failed to send challenge verification: {}", e);
+async fn handle_device_connection(
+    server_arc: Arc<TcpServer>,
+    tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
+    connecting_device_option: Option<DiscoveredDevice>,
+) {
+    if let Some(connecting_device) = connecting_device_option {
+        let (res_sender, mut res_receiver) = mpsc::channel::<ServerResponse>(100);
+
+        {
+            let mut connected_devices_arc = server_arc.connected_devices.lock().await;
+            let device_connection = connected_devices_arc
+                .entry(connecting_device.device_id.clone())
+                .or_insert_with(|| ServerTcpPeer {
+                    device_id: connecting_device.device_id.clone(),
+                    connection: Arc::new(Mutex::new(tls_stream)),
+                    connection_status: Unknown,
+                });
+            if device_connection.connection_status == Unknown {
+                let connection = device_connection.connection.clone();
+                let device_id = device_connection.device_id.clone();
+                tokio::spawn(async move {
+                    let mut buffer = Vec::new();
+                    loop {
+                        let mut locked_connection = connection.lock().await;
+                        match locked_connection.read(&mut buffer).await {
+                            Ok(_) => {
+                                handle_server_request(
+                                    &device_id,
+                                    buffer.clone(),
+                                    res_sender.clone(),
+                                )
+                                .await;
+                                AsyncWriteExt::flush(&mut buffer)
+                                    .await
+                                    .expect("Cannot flush");
+                            }
+                            Err(_) => {}
+                        }
                     }
-                }
-                ServerRequest::AcceptConnection(_) => {}
-                ServerRequest::RejectConnection(_) => {}
-                ServerRequest::SeedingFiles => {
-                    sender.send(ServerResponse::SeedingFiles {
-                        files_data: get_seeding_files().await
-                    }).await.expect("Cannot send");
-                }
+                });
             }
         }
+
+        let device_id = connecting_device.device_id.clone();
+        tokio::spawn(async move {
+            let connected_device_id = device_id.clone();
+
+            let connection = {
+                let connected_devices_arc = server_arc.connected_devices.lock().await;
+                if let Some(con) = connected_devices_arc.get(&connected_device_id) {
+                    con.connection.clone()
+                } else {
+                    return;
+                }
+            };
+
+            loop {
+                while let Some(message) = res_receiver.recv().await {
+                    send_response_to_client(connection.clone(), message.clone())
+                        .await
+                        .expect(&format!("Cannot send message to the client: {:?}", message));
+                }
+            }
+        });
+    }
+}
+
+async fn handle_server_request(
+    sender_id: &String,
+    buffer: Vec<u8>,
+    sender: Sender<ServerResponse>,
+) {
+    match serde_json::from_slice::<ServerRequest>(&buffer) {
+        Ok(req) => match req {
+            ServerRequest::InitialRequest { .. } => {}
+            ServerRequest::ChallengeRequest { .. } => {}
+            ServerRequest::ChallengeResponse { .. } => {
+                if let Err(e) = DefaultChallengeManager
+                    .get_sender()
+                    .send(ChallengeEvent::ChallengeVerification {
+                        connection_response: req,
+                    })
+                    .await
+                {
+                    error!("Failed to send challenge verification: {}", e);
+                }
+            }
+            ServerRequest::AcceptConnection(_) => {}
+            ServerRequest::RejectConnection(_) => {}
+            ServerRequest::FileRequest(file_id) => send_file_chunked(),
+            ServerRequest::SeedingFiles => {
+                sender
+                    .send(ServerResponse::SeedingFiles {
+                        files_data: get_seeding_files().await,
+                    })
+                    .await
+                    .expect("Cannot send");
+            }
+        },
         Err(_) => {}
     }
 }
@@ -287,9 +318,14 @@ async fn get_serialized_challenge(
     Ok(serialized)
 }
 
-async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<(), CommonThreadError> {
+async fn handle_ca_request(
+    mut stream: TcpStream,
+    socket: SocketAddr,
+) -> Result<(), CommonThreadError> {
     let mut buffer = vec![0; 4096];
-    let bytes_read = stream.read(&mut buffer).await
+    let bytes_read = stream
+        .read(&mut buffer)
+        .await
         .map_err(|e| of_type("Failed to read client request", ErrorKind::Other))?;
 
     let current_device_id = DeviceId.clone();
@@ -299,26 +335,35 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
             match request {
                 SigningServerRequest::FetchCrt => {
                     if let Some(device) = get_device_by_socket(&socket).await {
-                        info!("Received CRT request from device {}. Attempting to load origin CA...", device.device_id);
+                        info!(
+                            "Received CRT request from device {}. Attempting to load origin CA...",
+                            device.device_id
+                        );
                         match load_server_crt_pem() {
                             Ok(ca_cert) => {
-                                stream.write_all(&serde_json::to_vec(
-                                    &ServerResponse::Certificate {
-                                        cert: ca_cert.clone()
-                                    }
-                                )?).await?;
+                                stream
+                                    .write_all(&serde_json::to_vec(&ServerResponse::Certificate {
+                                        cert: ca_cert.clone(),
+                                    })?)
+                                    .await?;
                             }
                             Err(e) => {
                                 error!("Failed to load server certificate: {}", e);
-                                stream.write_all(&serde_json::to_vec(
-                                    &ServerResponse::Error {
-                                        message: format!("Failed to load server certificate: {}", e)
-                                    }
-                                )?).await?;
+                                stream
+                                    .write_all(&serde_json::to_vec(&ServerResponse::Error {
+                                        message: format!(
+                                            "Failed to load server certificate: {}",
+                                            e
+                                        ),
+                                    })?)
+                                    .await?;
                             }
                         }
                     } else {
-                        error!("Device not found for IP address: {}. Device must be discovered first through UDP broadcast.", socket.ip());
+                        error!(
+                            "Device not found for IP address: {}. Device must be discovered first through UDP broadcast.",
+                            socket.ip()
+                        );
                         stream.write_all(&serde_json::to_vec(
                             &ServerResponse::Error {
                                 message: format!("Device not found for IP address: {}. Device must be discovered first through UDP broadcast.", socket.ip())
@@ -326,49 +371,36 @@ async fn handle_ca_request(mut stream: TcpStream, socket: SocketAddr) -> Result<
                         )?).await?;
                     }
                 }
-                SigningServerRequest::SignCsr { csr } => {
-                    match sign_client_csr(&csr) {
-                        Ok(signed_crt) => {
-                            stream.write_all(&serde_json::to_vec(
-                                &ServerResponse::SignedCertificate {
-                                    device_id: current_device_id,
-                                    cert_pem: String::from_utf8_lossy(signed_crt.as_slice()).to_string(),
-                                }
-                            )?).await?;
-                        }
-                        Err(e) => {
-                            error!("Failed to sign client CSR: {}", e);
-                            stream.write_all(&serde_json::to_vec(
-                                &ServerResponse::Error {
-                                    message: format!("Failed to sign client CSR: {}", e)
-                                }
-                            )?).await?;
-                        }
+                SigningServerRequest::SignCsr { csr } => match sign_client_csr(&csr) {
+                    Ok(signed_crt) => {
+                        stream
+                            .write_all(&serde_json::to_vec(&ServerResponse::SignedCertificate {
+                                device_id: current_device_id,
+                                cert_pem: String::from_utf8_lossy(signed_crt.as_slice())
+                                    .to_string(),
+                            })?)
+                            .await?;
                     }
-                }
+                    Err(e) => {
+                        error!("Failed to sign client CSR: {}", e);
+                        stream
+                            .write_all(&serde_json::to_vec(&ServerResponse::Error {
+                                message: format!("Failed to sign client CSR: {}", e),
+                            })?)
+                            .await?;
+                    }
+                },
             }
             Ok(())
         }
         Err(e) => {
             error!("Failed to deserialize signing server request: {}", e);
-            stream.write_all(&serde_json::to_vec(
-                &ServerResponse::Error {
-                    message: format!("Invalid request format: {}", e)
-                }
-            )?).await?;
+            stream
+                .write_all(&serde_json::to_vec(&ServerResponse::Error {
+                    message: format!("Invalid request format: {}", e),
+                })?)
+                .await?;
             Ok(())
         }
-    }
-}
-
-async fn is_tcp_port_available(port: u16) -> bool {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-
-    match TcpListener::bind(addr).await {
-        Ok(listener) => {
-            drop(listener);
-            true
-        }
-        Err(_) => false,
     }
 }

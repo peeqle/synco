@@ -143,7 +143,7 @@ pub enum ServerRequest {
     },
     AcceptConnection(String),
     RejectConnection(String),
-
+    FileRequest(String),
     SeedingFiles
 }
 
