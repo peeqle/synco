@@ -1,16 +1,18 @@
 mod cert;
 
 use crate::broadcast::DiscoveredDevice;
+use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::client::cert::{request_ca, request_signed_cert};
 use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::DefaultDeviceManager;
+use crate::diff::{get_file, get_file_writer, get_seeding_files, FileEntity, Files};
 use crate::keychain::node::load::{load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der, node_cert_exists};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::server::load::load_server_signed_ca;
 use crate::keychain::server::save_server_cert;
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest, TcpServer};
-use crate::tcp_utils::send_framed;
+use crate::tcp_utils::{receive_file_chunked, send_file_chunked, send_framed};
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use lazy_static::lazy_static;
@@ -43,7 +45,7 @@ lazy_static! {
         let (sender, receiver) = mpsc::channel::<ClientActivity>(500);
         Arc::new( ClientManager {
             connections:Arc::new(Mutex::new(HashMap::new())),
-            bounded_channel: (sender, Mutex::new(receiver)) 
+            bounded_channel: (sender, Mutex::new(receiver))
         })
     };
 
@@ -317,7 +319,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         sender: client_sender,
     };
 
-    start_server_response_listener(&new_peer, server_id.clone());
+    server_response_listener(&new_peer, server_id.clone());
 
     //Tcp client connection set up
     {
@@ -333,47 +335,49 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     }
 
     //request receiver initialization
-    start_client_request_listener(&device.device_id, client_receiver).await;
+    client_request_listener(&device.device_id, client_receiver).await;
 
     info!("Connection setup completed for: {}", server_id);
     Ok(())
 }
 
-fn start_server_response_listener(peer: &ClientTcpPeer, server_id: String) {
+fn server_response_listener(peer: &ClientTcpPeer, server_id: String) {
     let connection_reader = Arc::clone(&peer.connection);
     let reader_server_id = server_id.clone();
     tokio::spawn(async move {
-        let mut buffer = vec![0; 4096];
-
+        let mut buffer = Vec::new();
         loop {
-            let bytes_read = {
-                let mut locked_connection = connection_reader.lock().await;
-                match locked_connection.read(&mut buffer).await {
-                    Ok(0) => {
-                        info!("Connection closed by server: {}", reader_server_id);
-                        break;
+            let mut locked_connection = connection_reader.lock().await;
+            match locked_connection.read(&mut buffer).await {
+                Ok(_) => {
+                    match serde_json::from_slice::<ServerResponse>(&buffer) {
+                        Ok(req) => match req {
+                            ServerResponse::SeedingFiles { .. } => {}
+                            ServerResponse::FileMetadata {
+                                file_id, size
+                            } => {
+                                if let Some(existing_file) = get_file(&file_id).await {
+                                    let file_writer = get_file_writer(&existing_file).await?;
+                                    receive_file_chunked(Arc::clone(&connection_reader), size, file_writer).await?;
+                                }
+                            }
+                            ServerResponse::Error { .. } => {}
+                            _ => {}
+                        },
+                        Err(_) => {}
                     }
-                    Ok(n) => n,
-                    Err(e) => {
-                        error!("TLS read error from {}: {}", reader_server_id, e);
-                        break;
-                    }
+
+                    AsyncWriteExt::flush(&mut buffer)
+                        .await
+                        .expect("Cannot flush");
                 }
-            };
-
-            let received_data = String::from_utf8_lossy(&buffer[..bytes_read]);
-            //todo handle actions and make connection to the diff mod
-            // add support for diff metadata and initial file meta handshake
-            //async channel for actions?
-            //static configuration?
-            info!("Received {} bytes from {}: {}", bytes_read, reader_server_id, received_data);
+                Err(_) => {}
+            }
         }
-
-        info!("Connection reader task ended for: {}", reader_server_id);
     });
 }
 
-async fn start_client_request_listener(server_id: &String, mut client_receiver: Receiver<ServerRequest>) {
+async fn client_request_listener(server_id: &String, mut client_receiver: Receiver<ServerRequest>) {
     let manager = Arc::clone(&DefaultClientManager);
     let mut connections = manager.connections.lock().await;
 

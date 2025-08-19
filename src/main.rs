@@ -7,7 +7,6 @@ use std::fs;
 use std::ops::Deref;
 use std::path::PathBuf;
 
-mod balancer;
 mod broadcast;
 mod challenge;
 mod client;

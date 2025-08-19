@@ -33,26 +33,18 @@ pub fn is_file_binary_utf8<T: AsRef<Path>>(path: T) -> Result<bool, CommonThread
     }
 }
 
-pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<(), Box<io::Error>> {
-    if !fs::exists(path.as_ref())? {
-        return Err(Box::new(io::Error::new(
-            ErrorKind::NotFound,
-            format!("File is not found: {}", path.as_ref().display()).as_str(),
-        )));
+pub fn verify_permissions<T: AsRef<Path>>(path: T, need_write: bool) -> Result<bool, CommonThreadError> {
+    let metadata = fs::metadata(path.as_ref())?;
+
+    if metadata.is_dir() {
+        return Ok(false);
     }
 
-    let md = fs::metadata(path.as_ref())?;
-    let permissions = md.permissions();
-    let readonly = permissions.readonly();
-
-    if readonly && need_write {
-        return Err(Box::new(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!("Cannot reach file for write: {}", path.as_ref().display()).as_str(),
-        )));
+    if need_write {
+        Ok(!metadata.permissions().readonly())
+    } else {
+        Ok(true)
     }
-
-    Ok(())
 }
 
 pub fn blake_digest<T: AsRef<Path>>(path: T) -> Result<Hash, CommonThreadError> {

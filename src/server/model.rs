@@ -168,6 +168,10 @@ pub enum ServerResponse {
     SeedingFiles {
         files_data: Vec<String>
     },
+    FileMetadata {
+        file_id: String,
+        size: u64
+    },
     Error {
         message: String,
     },

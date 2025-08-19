@@ -1,10 +1,11 @@
+use crate::CommonThreadError;
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
+use crate::challenge::{ChallengeEvent, DefaultChallengeManager, generate_challenge};
 use crate::consts::{
-    of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT,
+    CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT, DeviceId, of_type,
 };
-use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::diff::{attach, get_file, get_seeding_files, Files};
+use crate::device_manager::{DefaultDeviceManager, get_device, get_device_by_socket};
+use crate::diff::{Files, attach, get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
@@ -15,13 +16,12 @@ use crate::server::model::{
 };
 use crate::server::util::is_tcp_port_available;
 use crate::tcp_utils::{send_file_chunked, send_framed};
-use crate::CommonThreadError;
 use lazy_static::lazy_static;
 use log::{error, info};
-use rustls::{server, ServerConnection};
+use rustls::{ServerConnection, server};
 use std::error::Error;
 use std::fmt::format;
-use std::io::{read_to_string, ErrorKind, Write};
+use std::io::{ErrorKind, Write, read_to_string};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -30,7 +30,7 @@ use std::{fs, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tokio_rustls::TlsStream;
@@ -201,8 +201,9 @@ async fn open_device_connection(
                             ServerRequest::AcceptConnection(_) => {}
                             ServerRequest::RejectConnection(_) => {}
                             ServerRequest::FileRequest(file_id) => {
-                                if let Some(file) = get_file(&file_id).await  {
-                                    send_file_chunked(connection.clone(), &file).await
+                                if let Some(file) = get_file(&file_id).await {
+                                    send_file_chunked(connection.clone(), &file)
+                                        .await
                                         .expect("Error while sending file");
                                 }
                             }

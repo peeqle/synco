@@ -1,26 +1,28 @@
 mod consts;
 mod util;
 
-use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
+use crate::consts::{BUFFER_SIZE, CommonThreadError, DeviceId, of_type};
+use crate::diff::SnapshotAction::Update;
 use crate::diff::consts::MAX_FILE_SIZE_BYTES;
 use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
-use crate::diff::SnapshotAction::Update;
-use crate::utils::get_default_application_dir;
 use crate::utils::DirType::Cache;
+use crate::utils::get_default_application_dir;
 use blake3::Hash;
 use lazy_static::lazy_static;
 use mockall::Any;
 use notify::event::{DataChange, ModifyKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fs::{self, copy, remove_file};
+use std::io;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use tokio::io::{AsyncWrite, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
@@ -33,11 +35,23 @@ lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
 }
 
-pub async fn get_file (file_id: &String) -> Option<FileEntity>
-{
+pub async fn get_file(file_id: &String) -> Option<FileEntity> {
     let file_manager = Arc::clone(&Files);
     let mtx = file_manager.lock().await;
     mtx.get(file_id).cloned()
+}
+
+pub async fn get_file_writer(
+    file_entity: &FileEntity,
+) -> Result<BufWriter<tokio::fs::File>, CommonThreadError> {
+    if verify_permissions(&file_entity.path, true)? {
+        let file = tokio::fs::File::open(&file_entity.path).await?;
+        return Ok(BufWriter::new(file));
+    }
+    Err(Box::new(io::Error::new(
+        ErrorKind::NotFound,
+        "Cannot create file writer",
+    )))
 }
 
 #[derive(Clone)]
@@ -292,8 +306,8 @@ pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), Com
 mod diff_test {
     use crate::consts::DEFAULT_TEST_SUBDIR;
     use crate::diff::util::blake_digest;
-    use crate::utils::get_default_application_dir;
     use crate::utils::DirType::Action;
+    use crate::utils::get_default_application_dir;
     use std::fs;
     use std::fs::File;
     use std::io::{BufWriter, Write};

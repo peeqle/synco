@@ -1,13 +1,42 @@
 use std::fs::File;
-use serde_json::json;
 use std::io::{self, Read};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::consts::CommonThreadError;
 use crate::diff::FileEntity;
+use crate::server::model::ServerResponse::FileMetadata;
+
+pub const FILE_CHUNK_SIZE: usize = 8192;
+pub async fn receive_file_chunked<T, W>(
+    connection: Arc<Mutex<T>>,
+    size: u64,
+    mut writer: W
+) -> Result<(), CommonThreadError>
+where
+    T: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+{
+    let mut mtx = connection.lock().await;
+    let mut received_bytes: u64 = 0;
+    let mut buffer = vec![0u8; FILE_CHUNK_SIZE];
+
+    while received_bytes < size {
+        let bytes_to_read = std::cmp::min(FILE_CHUNK_SIZE, (size - received_bytes) as usize);
+        buffer.resize(bytes_to_read, 0);
+
+        mtx.read_exact(&mut buffer).await?;
+        writer.write_all(&buffer).await?;
+
+        received_bytes += bytes_to_read as u64;
+    }
+
+    writer.flush().await?;
+
+    Ok(())
+}
 
 pub async fn send_file_chunked<T>(
     connection: Arc<Mutex<T>>,
@@ -17,18 +46,19 @@ where
     T: AsyncWrite + Unpin + Send + 'static,
 {
     let mut file = File::open(&file_entity.path)?;
-    let metadata = json!({
-        "filename": file_entity.filename,
-        "size": file_entity.size
-    });
+    let metadata = FileMetadata {
+        file_id: file_entity.id.clone(),
+        size: file_entity.size,
+    };
 
     let serialized_metadata = serde_json::to_vec(&metadata)?;
 
     let mut mtx = connection.lock().await;
-    mtx.write_all(&(serialized_metadata.len() as u64).to_le_bytes()).await?;
+    mtx.write_all(&(serialized_metadata.len() as u64).to_le_bytes())
+        .await?;
     mtx.write_all(&serialized_metadata).await?;
 
-    let mut buffer_chunk = [0u8; 8192];
+    let mut buffer_chunk = [0u8; FILE_CHUNK_SIZE];
 
     loop {
         let bytes_read = file.read(&mut buffer_chunk)?;
