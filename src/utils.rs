@@ -1,4 +1,7 @@
-use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_SERVER_CERT_STORAGE};
+use crate::consts::{
+    DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR,
+    DEFAULT_SERVER_CERT_STORAGE,
+};
 use crate::keychain::DEVICE_SIGNING_KEY;
 use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
@@ -16,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::sync::Mutex;
 
 pub mod control {
     use std::error::Error;
@@ -44,7 +46,17 @@ pub enum DirType {
     Action,
     Cache,
 }
+pub fn get_files_dir() -> PathBuf {
+    let mut application_dir = get_default_application_dir(DirType::Cache);
+    application_dir.push(DEFAULT_FILES_SUBDIR);
 
+    fs::create_dir_all(&application_dir).expect(&format!(
+        "Cannot create dirs at {}",
+        application_dir.to_str().unwrap_or("unknown")
+    ));
+
+    application_dir
+}
 pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
     let mut app_data_dir = match dir_type {
         DirType::Action => dirs::data_dir(),
@@ -62,11 +74,14 @@ pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
     if !fs::exists(&app_data_dir).unwrap() {
         fs::create_dir_all(app_data_dir.clone())
             .map_err(|e| {
-                rustls::Error::General(format!(
-                    "Failed to create directories at {}, {}",
-                    app_data_dir.clone().display(),
-                    e
-                ))
+                io::Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "Failed to create directories at {}, {}",
+                        app_data_dir.clone().display(),
+                        e
+                    ),
+                )
             })
             .unwrap();
     }

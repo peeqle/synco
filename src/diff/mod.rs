@@ -1,15 +1,15 @@
 mod consts;
+pub mod model;
 mod util;
 
 use crate::consts::{BUFFER_SIZE, CommonThreadError, DeviceId, of_type};
 use crate::diff::SnapshotAction::Update;
 use crate::diff::consts::MAX_FILE_SIZE_BYTES;
+use crate::diff::model::{FileEntity, SynchroPoint};
 use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
 use crate::utils::DirType::Cache;
-use crate::utils::get_default_application_dir;
-use blake3::Hash;
+use crate::utils::{get_default_application_dir, get_files_dir};
 use lazy_static::lazy_static;
-use mockall::Any;
 use notify::event::{DataChange, ModifyKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
@@ -25,7 +25,6 @@ use std::sync::atomic::AtomicBool;
 use tokio::io::{AsyncWrite, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::Instant;
 use uuid::Uuid;
 
 lazy_static! {
@@ -44,38 +43,19 @@ pub async fn get_file(file_id: &String) -> Option<FileEntity> {
 pub async fn get_file_writer(
     file_entity: &FileEntity,
 ) -> Result<BufWriter<tokio::fs::File>, CommonThreadError> {
-    if verify_permissions(&file_entity.path, true)? {
+    if file_entity.path.exists() && verify_permissions(&file_entity.path, true)? {
         let file = tokio::fs::File::open(&file_entity.path).await?;
+        return Ok(BufWriter::new(file));
+    } else if !file_entity.path.exists() {
+        let default_file_dir = get_files_dir();
+        let filepath = default_file_dir.join(&file_entity.filename);
+        let file = tokio::fs::File::create_new(filepath).await?;
         return Ok(BufWriter::new(file));
     }
     Err(Box::new(io::Error::new(
         ErrorKind::NotFound,
         "Cannot create file writer",
     )))
-}
-
-#[derive(Clone)]
-pub struct FileEntity {
-    pub id: String,
-    pub path: PathBuf,
-    pub filename: String,
-    pub size: u64,
-    snapshot_path: Option<PathBuf>,
-    prev_hash: Option<Hash>,
-    pub current_hash: Hash,
-    is_in_sync: Arc<AtomicBool>,
-    //devices in-sync
-    main_node: String,
-    synced_with: Vec<String>,
-    //
-    last_update: Option<Instant>,
-    notify: Arc<Notify>,
-}
-
-#[derive(Clone)]
-pub struct SynchroPoint {
-    pub path: PathBuf,
-    pub enabled: bool,
 }
 
 pub mod point {

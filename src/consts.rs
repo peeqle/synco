@@ -18,6 +18,7 @@ pub fn of_type(text: &str, error_kind: ErrorKind) -> Box<io::Error> {
 }
 
 pub const DEFAULT_APP_SUBDIR: &str = "synco";
+pub const DEFAULT_FILES_SUBDIR: &str = "files";
 pub const DEFAULT_TEST_SUBDIR: &str = "test";
 
 pub const DEFAULT_CLIENT_CERT_STORAGE: &str = "client";

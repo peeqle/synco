@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::consts::CommonThreadError;
-use crate::diff::FileEntity;
+use crate::diff::model::FileEntity;
 use crate::server::model::ServerResponse::FileMetadata;
 
 pub const FILE_CHUNK_SIZE: usize = 8192;
