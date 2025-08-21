@@ -41,6 +41,6 @@ pub const DEFAULT_LISTENING_PORT: u16 = 22001;
 
 pub const BUFFER_SIZE: usize = 16 * 1024;
 
-pub const CLEANUP_DELAY: u64 = 15;
-pub const CHALLENGE_DEATH: u64 = 60;
-pub const BROADCAST_INTERVAL_SECONDS: u64 = 10;
+pub const CLEANUP_DELAY: u64 = 5;
+pub const CHALLENGE_DEATH: u64 = 160;
+pub const BROADCAST_INTERVAL_SECONDS: u64 = 2;

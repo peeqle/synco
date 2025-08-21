@@ -27,4 +27,4 @@ log = "0.4.27"
 aes-gcm = "0.10.3"
 pbkdf2 = "0.12.2"
 sha2 = "0.10.9"
-vis={path = "../noscope360"}
+vis = "0.0.0"

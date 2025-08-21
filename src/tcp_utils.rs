@@ -7,7 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::consts::CommonThreadError;
 use crate::diff::model::FileEntity;
-use crate::server::model::ServerResponse::FileMetadata;
+use crate::server::model::ServerRequest;
+use crate::server::model::ServerResponse::{self, FileMetadata};
 
 pub const FILE_CHUNK_SIZE: usize = 8192;
 pub async fn receive_file_chunked<T, W>(
@@ -87,7 +88,7 @@ where
     Ok(())
 }
 
-pub async fn receive_frame<T>(connection: Arc<Mutex<T>>) -> Result<(), CommonThreadError>
+pub async fn receive_frame<T>(connection: Arc<Mutex<T>>) -> Result<ServerRequest, CommonThreadError>
 where
     T: AsyncRead + Unpin + Send + 'static,
 {
@@ -108,5 +109,7 @@ where
     let mut buffer = vec![0u8; len];
     mtx.read_exact(&mut buffer).await?;
 
-    Ok(())
+    let req = serde_json::from_slice::<ServerRequest>(&buffer)?;
+
+    Ok(req)
 }
