@@ -113,7 +113,8 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                         tls_stream,
                         connecting_device_option,
                     )
-                    .await;
+                    .await
+                        .expect("Cannot handle device session");
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);

@@ -183,6 +183,7 @@ impl Step for DisplaySyncPoints {
             let points = Points.clone();
             handle.block_on(async {
                 let mtx = points.lock().await;
+                println!("idx\tTYPE\tPATH\t\t\t\t\tENABLED\t");
                 for (idx, (ext, point)) in mtx.iter().enumerate() {
                     println!("{}\t{}\t{:?}\t{}", idx, ext, point.path, point.enabled);
                 }

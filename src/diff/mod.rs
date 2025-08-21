@@ -2,25 +2,26 @@ mod consts;
 pub mod model;
 mod util;
 
-use crate::consts::{BUFFER_SIZE, CommonThreadError, DeviceId, of_type};
-use crate::diff::SnapshotAction::Update;
+use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
 use crate::diff::consts::MAX_FILE_SIZE_BYTES;
 use crate::diff::model::{FileEntity, SynchroPoint};
 use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
+use crate::diff::SnapshotAction::Update;
 use crate::utils::DirType::Cache;
 use crate::utils::{get_default_application_dir, get_files_dir};
 use lazy_static::lazy_static;
 use notify::event::{DataChange, ModifyKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fs::{self, copy, remove_file};
 use std::io;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use map::map;
 use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
@@ -29,8 +30,16 @@ use uuid::Uuid;
 lazy_static! {
     pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> = {
+        let default_point_map = map!((
+            "ALL".to_string(),
+            SynchroPoint {
+                path: get_files_dir(),
+                enabled: true
+            }
+        ));
+        Arc::new(Mutex::new(default_point_map))
+    };
 }
 
 pub async fn get_file(file_id: &String) -> Option<FileEntity> {
@@ -285,8 +294,8 @@ pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), Com
 mod diff_test {
     use crate::consts::DEFAULT_TEST_SUBDIR;
     use crate::diff::util::blake_digest;
-    use crate::utils::DirType::Action;
     use crate::utils::get_default_application_dir;
+    use crate::utils::DirType::Action;
     use std::fs;
     use std::fs::File;
     use std::io::{BufWriter, Write};
