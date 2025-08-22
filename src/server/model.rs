@@ -1,4 +1,5 @@
 use crate::consts::CommonThreadError;
+use crate::diff::model::FileEntityDto;
 use crate::keychain::server::generate_root_ca;
 use crate::keychain::{generate_cert_keys, load_leaf_cert_der, load_leaf_private_key_der};
 use crate::machine_utils::get_local_ip;
@@ -166,7 +167,7 @@ pub enum ServerResponse {
         cert: String
     },
     SeedingFiles {
-        files_data: Vec<String>
+        shared_files: Vec<FileEntityDto>
     },
     FileMetadata {
         file_id: String,

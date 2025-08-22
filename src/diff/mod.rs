@@ -2,36 +2,27 @@ mod consts;
 pub mod model;
 mod util;
 
-use crate::consts::{of_type, CommonThreadError, DeviceId, BUFFER_SIZE};
-use crate::diff::consts::MAX_FILE_SIZE_BYTES;
+use crate::consts::{CommonThreadError, BUFFER_SIZE};
 use crate::diff::model::{FileEntity, SynchroPoint};
-use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
-use crate::diff::SnapshotAction::Update;
-use crate::utils::DirType::Cache;
-use crate::utils::{get_default_application_dir, get_files_dir};
+use crate::diff::util::verify_permissions;
+use crate::utils::get_files_dir;
 use lazy_static::lazy_static;
-use notify::event::{DataChange, ModifyKind, RemoveKind};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::hash_map::Entry;
+use notify::Watcher;
 use std::collections::HashMap;
-use std::fs::{self, copy, remove_file};
 use std::io;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::path::Path;
 use std::sync::Arc;
-use map::map;
 use tokio::io::BufWriter;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, Notify};
-use uuid::Uuid;
+use tokio::sync::Mutex;
 
 lazy_static! {
     pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
         Arc::new(Mutex::new(HashMap::new()));
     pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> = {
-        let default_point_map = map!((
+        let default_point_map = map::map!((
             "ALL".to_string(),
             SynchroPoint {
                 path: get_files_dir(),
@@ -66,11 +57,217 @@ pub async fn get_file_writer(
     )))
 }
 
+pub mod files {
+    use crate::consts::{of_type, CommonThreadError, DeviceId};
+    use crate::diff::consts::MAX_FILE_SIZE_BYTES;
+    use crate::diff::files::SnapshotAction::Update;
+    use crate::diff::model::{FileEntity, FileEntityDto};
+    use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
+    use crate::diff::Files;
+    use crate::utils::get_default_application_dir;
+    use crate::utils::DirType::Cache;
+    use notify::event::{DataChange, ModifyKind, RemoveKind};
+    use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+    use std::collections::hash_map::Entry;
+    use std::fs;
+    use std::fs::{copy, remove_file};
+    use std::io::ErrorKind;
+    use std::os::unix::prelude::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    use uuid::Uuid;
+
+    pub async fn get_seeding_files() -> Vec<FileEntityDto> {
+        let files = Files.clone();
+        let mtx = files.lock().await;
+
+        mtx.iter().map(|(_, y)| y.to_dto()).collect()
+    }
+
+    pub async fn remove(file_id: &String) -> Result<(), CommonThreadError> {
+        let file_manager = Files.clone();
+        let mut mtx = file_manager.lock().await;
+
+        mtx.remove_entry(file_id).expect("Cannot remove entry");
+        Ok(())
+    }
+
+    pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
+        let permissions = verify_permissions(&path, false);
+        if permissions.is_err() {
+            return Err(permissions.err().unwrap());
+        }
+        if !verify_file_size(&path) {
+            return Err(of_type(
+                &format!("File is too large, max is {}", MAX_FILE_SIZE_BYTES),
+                ErrorKind::Other,
+            ));
+        }
+
+        let metadata = fs::metadata(&path)?;
+
+        let file_manager = Files.clone();
+        let mut current_state = file_manager.lock().await;
+
+        let blake_filepath_hash = blake_digest(&path)?;
+        match current_state.entry(blake3::hash(path.as_ref().as_os_str().as_bytes()).to_string()) {
+            Entry::Occupied(entry) => {
+                println!(
+                    "Recalculating hashes for {}",
+                    path.as_ref().to_str().unwrap()
+                );
+            }
+            Entry::Vacant(_) => {
+                current_state.insert(
+                    blake_filepath_hash.to_string(),
+                    FileEntity {
+                        id: Uuid::new_v4().to_string(),
+                        filename: String::from(
+                            PathBuf::from(path.as_ref())
+                                .file_name()
+                                .unwrap()
+                                .to_str()
+                                .unwrap(),
+                        ),
+                        size: metadata.len(),
+                        path: PathBuf::from(path.as_ref()),
+                        is_in_sync: Arc::new(AtomicBool::new(false)),
+                        snapshot_path: None,
+                        prev_hash: None,
+                        current_hash: blake_filepath_hash,
+                        main_node: DeviceId.clone(),
+                        synced_with: vec![],
+                        last_update: None,
+                        notify: Arc::new(Notify::new()),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(file: &mut FileEntity, action: SnapshotAction) -> Result<(), CommonThreadError> {
+        let mut clone = || -> Result<(), CommonThreadError> {
+            if let Some(file_name) = file.path.file_name() {
+                let dir = get_default_application_dir(Cache);
+
+                copy(&file.path, dir.join(&file_name))?;
+                file.snapshot_path = Some(dir.join(&file_name));
+            }
+            Ok(())
+        };
+        match action {
+            SnapshotAction::Create => {
+                clone()?;
+            }
+            SnapshotAction::Update => {
+                clone()?;
+            }
+            SnapshotAction::Remove => {
+                if let Some(file_path) = &file.snapshot_path {
+                    remove_file(file_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub enum SnapshotAction {
+        Create,
+        Update,
+        Remove,
+    }
+
+    pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
+        let file_manager = Files.clone();
+        let notify_future = Arc::clone(&file.notify);
+
+        let path_arc = Arc::new(path.as_ref().to_path_buf());
+        tokio::spawn(async move {
+            loop {
+                notify_future.notified().await;
+
+                let mut mtx = file_manager.lock().await;
+                let path_key = blake3::hash(path_arc.as_os_str().as_bytes()).to_string();
+
+                if let Some(entry) = mtx.get_mut(&path_key) {
+                    //send changes to node
+
+                    snapshot(entry, Update).expect("Cannot create file snapshot");
+                }
+            }
+        });
+    }
+
+    pub async fn check_file_change(file: &FileEntity) -> RecommendedWatcher {
+        let notify_future = Arc::clone(&file.notify);
+        let file_path = file.path.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
+                Ok(event) => {
+                    if event.paths.contains(&file_path)
+                        && (matches!(
+                        event.kind,
+                        notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))
+                    ) || matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any)))
+                    {
+                        notify_future.notify_waiters();
+                    }
+                }
+                Err(e) => eprintln!("{:?}", e),
+            })
+                .expect("Cannot build watcher");
+
+        watcher
+            .watch(&file.path.clone(), RecursiveMode::NonRecursive)
+            .expect("Cannot watch");
+
+        watcher
+    }
+}
+
+
+/**
+For now consider that a bullshit, cause idk how to efficiently compare two+ distinct, fairly similar, but completely different files in the network
+*/
+///Called if only hashes on both sides are different
+/// 1. Read line from reader while reader line [i] == internal file line [i]
+/// 2. If reader line [i] != internal file line [i] - set flag
+/// 3. Start from the bottom
+///
+/// 3.1. Read line from reader while reader line [j] == internal file line [j]
+///
+/// 3.2 if reader line [j] != internal file line [j] - set flag
+///
+/// 4. Request content from the *synchronizing* point for the [flag_top, flag_bottom]
+/// 5. Load changes, update hashes on both sides
+
+pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), CommonThreadError> {
+    //create file synchronization stats - here - ???
+    //assuming that file is loaded on instant (test only)
+    //file hash deviation considered to load instantly
+
+    let mut buf = [0u8; 65536];
+    while reader.try_read(&mut buf)? > 0 {}
+
+    let mut buffer = vec![0; BUFFER_SIZE];
+    let mut total_bytes_received = 0;
+
+    Ok(())
+}
+
 pub mod point {
     use crate::consts::CommonThreadError;
     use crate::diff::{Points, SynchroPoint};
     use std::collections::hash_map::Entry;
     use std::path::PathBuf;
+
+    pub async fn get_point(target: &String) -> Option<SynchroPoint> {
+        let points = Points.lock().await;
+        points.get(target).cloned()
+    }
 
     pub async fn update_point(
         file_extension: String,
@@ -112,183 +309,6 @@ pub mod point {
         mtx.remove(&file_extension);
         Ok(())
     }
-}
-
-pub async fn get_seeding_files() -> Vec<String> {
-    let files = Files.clone();
-    let mtx = files.lock().await;
-
-    mtx.iter().map(|(x, y)| y.id.clone()).collect()
-}
-
-pub async fn remove(file_id: &String) -> Result<(), CommonThreadError> {
-    let file_manager = Files.clone();
-    let mut mtx = file_manager.lock().await;
-
-    mtx.remove_entry(file_id).expect("Cannot remove entry");
-    Ok(())
-}
-
-pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
-    let permissions = verify_permissions(&path, false);
-    if permissions.is_err() {
-        return Err(permissions.err().unwrap());
-    }
-    if !verify_file_size(&path) {
-        return Err(of_type(
-            &format!("File is too large, max is {}", MAX_FILE_SIZE_BYTES),
-            ErrorKind::Other,
-        ));
-    }
-
-    let metadata = fs::metadata(&path)?;
-
-    let file_manager = Files.clone();
-    let mut current_state = file_manager.lock().await;
-
-    let blake_filepath_hash = blake_digest(&path)?;
-    match current_state.entry(blake3::hash(path.as_ref().as_os_str().as_bytes()).to_string()) {
-        Entry::Occupied(entry) => {
-            println!(
-                "Recalculating hashes for {}",
-                path.as_ref().to_str().unwrap()
-            );
-        }
-        Entry::Vacant(_) => {
-            current_state.insert(
-                blake_filepath_hash.to_string(),
-                FileEntity {
-                    id: Uuid::new_v4().to_string(),
-                    filename: String::from(
-                        PathBuf::from(path.as_ref())
-                            .file_name()
-                            .unwrap()
-                            .to_str()
-                            .unwrap(),
-                    ),
-                    size: metadata.len(),
-                    path: PathBuf::from(path.as_ref()),
-                    is_in_sync: Arc::new(AtomicBool::new(false)),
-                    snapshot_path: None,
-                    prev_hash: None,
-                    current_hash: blake_filepath_hash,
-                    main_node: DeviceId.clone(),
-                    synced_with: vec![],
-                    last_update: None,
-                    notify: Arc::new(Notify::new()),
-                },
-            );
-        }
-    }
-    Ok(())
-}
-
-pub fn snapshot(file: &mut FileEntity, action: SnapshotAction) -> Result<(), CommonThreadError> {
-    let mut clone = || -> Result<(), CommonThreadError> {
-        if let Some(file_name) = file.path.file_name() {
-            let dir = get_default_application_dir(Cache);
-
-            copy(&file.path, dir.join(&file_name))?;
-            file.snapshot_path = Some(dir.join(&file_name));
-        }
-        Ok(())
-    };
-    match action {
-        SnapshotAction::Create => {
-            clone()?;
-        }
-        SnapshotAction::Update => {
-            clone()?;
-        }
-        SnapshotAction::Remove => {
-            if let Some(file_path) = &file.snapshot_path {
-                remove_file(file_path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub enum SnapshotAction {
-    Create,
-    Update,
-    Remove,
-}
-
-pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
-    let file_manager = Files.clone();
-    let notify_future = Arc::clone(&file.notify);
-
-    let path_arc = Arc::new(path.as_ref().to_path_buf());
-    tokio::spawn(async move {
-        loop {
-            notify_future.notified().await;
-
-            let mut mtx = file_manager.lock().await;
-            let path_key = blake3::hash(path_arc.as_os_str().as_bytes()).to_string();
-
-            if let Some(entry) = mtx.get_mut(&path_key) {
-                //send changes to node
-
-                snapshot(entry, Update).expect("Cannot create file snapshot");
-            }
-        }
-    });
-}
-
-pub async fn check_file_change(file: &FileEntity) -> RecommendedWatcher {
-    let notify_future = Arc::clone(&file.notify);
-    let file_path = file.path.clone();
-    let mut watcher =
-        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
-            Ok(event) => {
-                if event.paths.contains(&file_path)
-                    && (matches!(
-                        event.kind,
-                        notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))
-                    ) || matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any)))
-                {
-                    notify_future.notify_waiters();
-                }
-            }
-            Err(e) => eprintln!("{:?}", e),
-        })
-        .expect("Cannot build watcher");
-
-    watcher
-        .watch(&file.path.clone(), RecursiveMode::NonRecursive)
-        .expect("Cannot watch");
-
-    watcher
-}
-
-/**
-For now consider that a bullshit, cause idk how to efficiently compare two+ distinct, fairly similar, but completely different files in the network
-*/
-///Called if only hashes on both sides are different
-/// 1. Read line from reader while reader line [i] == internal file line [i]
-/// 2. If reader line [i] != internal file line [i] - set flag
-/// 3. Start from the bottom
-///
-/// 3.1. Read line from reader while reader line [j] == internal file line [j]
-///
-/// 3.2 if reader line [j] != internal file line [j] - set flag
-///
-/// 4. Request content from the *synchronizing* point for the [flag_top, flag_bottom]
-/// 5. Load changes, update hashes on both sides
-
-pub fn process<T: AsRef<Path>>(path: T, mut reader: TcpStream) -> Result<(), CommonThreadError> {
-    //create file synchronization stats - here - ???
-    //assuming that file is loaded on instant (test only)
-    //file hash deviation considered to load instantly
-
-    let mut buf = [0u8; 65536];
-    while reader.try_read(&mut buf)? > 0 {}
-
-    let mut buffer = vec![0; BUFFER_SIZE];
-    let mut total_bytes_received = 0;
-
-    Ok(())
 }
 
 mod diff_test {

@@ -4,7 +4,8 @@ use crate::consts::{
     of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT,
 };
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::diff::{attach, get_file, get_seeding_files, Files};
+use crate::diff::files::get_seeding_files;
+use crate::diff::get_file;
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::keychain::{load_cert, load_cert_der};
@@ -114,7 +115,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                         connecting_device_option,
                     )
                     .await
-                        .expect("Cannot handle device session");
+                    .expect("Cannot handle device session");
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -172,7 +173,10 @@ async fn handle_device_connection(
     Ok(())
 }
 
-async fn open_device_connection(device_connection: &mut ServerTcpPeer, sender: Sender<ServerResponse> ) {
+async fn open_device_connection(
+    device_connection: &mut ServerTcpPeer,
+    sender: Sender<ServerResponse>,
+) {
     let connection = device_connection.connection.clone();
     tokio::spawn(async move {
         loop {
@@ -193,7 +197,7 @@ async fn open_device_connection(device_connection: &mut ServerTcpPeer, sender: S
                     ServerRequest::SeedingFiles => {
                         sender
                             .send(ServerResponse::SeedingFiles {
-                                files_data: get_seeding_files().await,
+                                shared_files: get_seeding_files().await,
                             })
                             .await
                             .expect("Cannot send");

@@ -1,5 +1,4 @@
 use crate::consts::CommonThreadError;
-use crate::diff::{attach, remove, Files};
 use crate::menu::{read_user_input, Action, Step};
 use log::error;
 use std::collections::LinkedList;
@@ -8,6 +7,8 @@ use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use tokio::runtime::Runtime;
+use crate::diff::Files;
+use crate::diff::files::{attach, remove};
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct FileAction {

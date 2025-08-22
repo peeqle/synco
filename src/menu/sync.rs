@@ -1,6 +1,6 @@
 use crate::consts::CommonThreadError;
 use crate::diff::point::{remove_point, update_point};
-use crate::diff::{attach, remove, Files, Points};
+use crate::diff::{Files, Points};
 use crate::menu::{read_user_input, Action, Step};
 use log::error;
 use std::collections::LinkedList;

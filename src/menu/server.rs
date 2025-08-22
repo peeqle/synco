@@ -99,7 +99,7 @@ impl Step for StartServerStep {
         });
 
         JoinsChannel.0.clone().send(handle)?;
-        Ok(true)
+        Ok(false)
     }
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {

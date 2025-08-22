@@ -7,7 +7,7 @@ use crate::consts::{
     CA_CERT_FILE_NAME, CERT_FILE_NAME, CommonThreadError, DEFAULT_SIGNING_SERVER_PORT, of_type,
 };
 use crate::device_manager::DefaultDeviceManager;
-use crate::diff::{Files, get_file, get_file_writer, get_seeding_files};
+use crate::diff::{Files, get_file, get_file_writer, files::get_seeding_files};
 use crate::keychain::node::load::{
     load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der,
     node_cert_exists,
@@ -408,7 +408,9 @@ fn server_response_listener(peer: &ClientTcpPeer, server_id: String) {
             if let Ok(_) = locked_connection.read(&mut buffer).await {
                 if let Ok(req) = serde_json::from_slice::<ServerResponse>(&buffer) {
                     match req {
-                        ServerResponse::SeedingFiles { .. } => {}
+                        ServerResponse::SeedingFiles { shared_files } => {
+                            
+                        }
                         ServerResponse::FileMetadata { file_id, size } => {
                             if let Some(existing_file) = get_file(&file_id).await {
                                 if let Ok(file_writer) = get_file_writer(&existing_file).await {
