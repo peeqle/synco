@@ -378,7 +378,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         sender: client_sender,
     };
 
-    server_response_listener(&new_peer, server_id.clone());
+    server_response_listener(&new_peer);
 
     //Tcp client connection set up
     {
@@ -400,7 +400,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     Ok(())
 }
 
-fn server_response_listener(peer: &ClientTcpPeer, server_id: String) {
+fn server_response_listener(peer: &ClientTcpPeer) {
     let connection_reader = Arc::clone(&peer.connection);
     tokio::spawn(async move {
         let mut buffer = Vec::new();

@@ -12,15 +12,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
-use std::io;
+use std::{default, io};
 use std::io::ErrorKind;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use vis::vis;
 
 impl TcpServer {
     pub fn new(
@@ -114,10 +116,10 @@ pub struct TcpServer {
     pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
 }
 
+#[vis(pub)]
 pub struct ServerTcpPeer {
-    pub device_id: String,
-    pub connection: Arc<Mutex<TlsStream<TcpStream>>>,
-    pub connection_status: ConnectionState,
+    connection: Arc<Mutex<TlsStream<TcpStream>>>,
+    connection_status: Arc<RwLock<ConnectionState>>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

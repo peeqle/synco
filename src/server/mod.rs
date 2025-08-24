@@ -1,13 +1,12 @@
 use crate::broadcast::DiscoveredDevice;
+use crate::challenge::DeviceChallengeStatus::Active;
 use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
-use crate::consts::{
-    of_type, DeviceId, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT,
-};
+use crate::consts::{of_type, DeviceId, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
 use crate::diff::files::{get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
-use crate::server::model::ConnectionState::{Access, Denied, Unknown};
+use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
 use crate::server::model::{
     Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
     TcpServer,
@@ -17,17 +16,20 @@ use crate::tcp_utils::{receive_frame, send_file_chunked, send_framed};
 use crate::CommonThreadError;
 use lazy_static::lazy_static;
 use log::{error, info};
+use model::ConnectionState;
 use rustls::{server, ServerConnection};
 use std::error::Error;
 use std::fmt::format;
 use std::io::{read_to_string, ErrorKind, Write};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::{fs, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task;
 
 pub(crate) mod model;
@@ -108,8 +110,8 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                         tls_stream,
                         connecting_device_option,
                     )
-                    .await
-                    .expect("Cannot handle device session");
+                        .await
+                        .expect("Cannot handle device session");
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -132,14 +134,11 @@ async fn handle_device_connection(
             let device_connection = connected_devices_arc
                 .entry(connecting_device.device_id.clone())
                 .or_insert_with(|| ServerTcpPeer {
-                    device_id: connecting_device.device_id.clone(),
                     connection: Arc::new(Mutex::new(tls_stream)),
-                    connection_status: Unknown,
+                    connection_status: Arc::new(RwLock::new(Unknown)),
                 });
 
-            if device_connection.connection_status == Unknown {
-                open_device_connection(device_connection, res_sender).await;
-            }
+            open_device_connection(device_connection, res_sender).await;
         }
 
         let device_id = connecting_device.device_id.clone();
@@ -172,30 +171,59 @@ async fn open_device_connection(
     sender: Sender<ServerResponse>,
 ) {
     let connection = device_connection.connection.clone();
+    let connection_status = device_connection.connection_status.clone();
+
     tokio::spawn(async move {
         loop {
-            if let Ok(request) = receive_frame(connection.clone()).await {
-                match request {
-                    ServerRequest::InitialRequest { .. } => {}
-                    ServerRequest::ChallengeRequest { .. } => {}
-                    ServerRequest::ChallengeResponse { .. } => {}
-                    ServerRequest::AcceptConnection(_) => {}
-                    ServerRequest::RejectConnection(_) => {}
-                    ServerRequest::FileRequest(file_id) => {
-                        if let Some(file) = get_file(&file_id).await {
-                            send_file_chunked(connection.clone(), &file)
-                                .await
-                                .expect("Error while sending file");
+            let current_status = connection_status.read().await;
+
+            if let Ok(frame) = receive_frame(connection.clone()).await {
+                match *current_status {
+                    Access => {
+                        match frame {
+                            ServerRequest::RejectConnection(_) => {
+                                //todo
+                            }
+                            ServerRequest::FileRequest(file_id) => {
+                                if let Some(file) = get_file(&file_id).await {
+                                    send_file_chunked(connection.clone(), &file)
+                                        .await
+                                        .expect("Error while sending file");
+                                }
+                            }
+                            ServerRequest::SeedingFiles => {
+                                sender
+                                    .send(ServerResponse::SeedingFiles {
+                                        shared_files: get_seeding_files().await,
+                                    })
+                                    .await
+                                    .expect("Cannot send");
+                            }
+                            _ => {
+                                sender
+                                    .send(ServerResponse::Error {
+                                        message: "Connection already established".to_string(),
+                                    })
+                                    .await
+                                    .expect("Cannot send");
+                            }
                         }
                     }
-                    ServerRequest::SeedingFiles => {
-                        sender
-                            .send(ServerResponse::SeedingFiles {
-                                shared_files: get_seeding_files().await,
-                            })
-                            .await
-                            .expect("Cannot send");
-                    }
+                    _ => match frame {
+                        ServerRequest::InitialRequest { .. } => {}
+                        ServerRequest::ChallengeRequest { .. } => {}
+                        ServerRequest::ChallengeResponse { .. } => {}
+                        ServerRequest::AcceptConnection(_) => {}
+                        ServerRequest::RejectConnection(_) => {}
+                        _ => {
+                            sender
+                                .send(ServerResponse::Error {
+                                    message: "Cannot access resource".to_string(),
+                                })
+                                .await
+                                .expect("Cannot send");
+                        }
+                    },
                 }
             }
         }
@@ -222,39 +250,40 @@ async fn handle_receiver_message(
             let mut cp = server.connected_devices.lock().await;
             let mut _device = cp.get_mut(&device_id);
 
-            if _device.is_some() {
-                let device_connection = _device.unwrap();
-                if device_connection.connection_status == Unknown {
-                    if let Some(d_device) = get_device(device_id.clone()).await {
-                        let mut mutex = device_connection.connection.lock().await;
-                        // match send_challenge(d_device, &mut mutex).await {
-                        //     Ok(_) => {
-                        //         device_connection.connection_status = Pending;
-                        //     }
-                        //     Err(_) => {}
-                        // }
-                    }
-                }
-
-                if device_connection.connection_status == Denied {
-                    return Err(Box::new(io::Error::new(
-                        ErrorKind::AlreadyExists,
-                        "Connection is denied",
-                    )));
-                }
-                if device_connection.connection_status == Access {
-                    return Err(Box::new(io::Error::new(
-                        ErrorKind::AlreadyExists,
-                        "Connection is already opened",
-                    )));
-                }
-            }
+            // if _device.is_some() {
+            //     let device_connection = _device.unwrap();
+            //     if device_connection.connection_status == Unknown {
+            //         if let Some(d_device) = get_device(device_id.clone()).await {
+            //             let mut mutex = device_connection.connection.lock().await;
+            //             // match send_challenge(d_device, &mut mutex).await {
+            //             //     Ok(_) => {
+            //             //         device_connection.connection_status = Pending;
+            //             //     }
+            //             //     Err(_) => {}
+            //             // }
+            //         }
+            //     }
+            //
+            //     if device_connection.connection_status == Denied {
+            //         return Err(Box::new(io::Error::new(
+            //             ErrorKind::AlreadyExists,
+            //             "Connection is denied",
+            //         )));
+            //     }
+            //     if device_connection.connection_status == Access {
+            //         return Err(Box::new(io::Error::new(
+            //             ErrorKind::AlreadyExists,
+            //             "Connection is already opened",
+            //         )));
+            //     }
+            // }
         }
         ServerActivity::VerifiedChallenge { device_id } => {
             let mut cp = server.connected_devices.lock().await;
             let mut _device = cp.get_mut(&device_id);
             if let Some(device) = _device {
-                device.connection_status = Access;
+                let mut mtx = device.connection_status.write().await;
+                *mtx = Access;
             }
         }
     }
