@@ -7,7 +7,7 @@ use crate::consts::{
     CA_CERT_FILE_NAME, CERT_FILE_NAME, CommonThreadError, DEFAULT_SIGNING_SERVER_PORT, of_type,
 };
 use crate::device_manager::DefaultDeviceManager;
-use crate::diff::{Files, get_file, get_file_writer, files::get_seeding_files};
+use crate::diff::{Files, files::get_seeding_files};
 use crate::keychain::node::load::{
     load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der,
     node_cert_exists,
@@ -43,6 +43,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
+use crate::diff::files::{append, get_file, get_file_writer};
 
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
@@ -409,7 +410,9 @@ fn server_response_listener(peer: &ClientTcpPeer, server_id: String) {
                 if let Ok(req) = serde_json::from_slice::<ServerResponse>(&buffer) {
                     match req {
                         ServerResponse::SeedingFiles { shared_files } => {
-                            
+                            for file_data in shared_files {
+                                append(file_data).await;
+                            }
                         }
                         ServerResponse::FileMetadata { file_id, size } => {
                             if let Some(existing_file) = get_file(&file_id).await {

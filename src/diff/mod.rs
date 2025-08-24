@@ -4,17 +4,13 @@ mod util;
 
 use crate::consts::{CommonThreadError, BUFFER_SIZE};
 use crate::diff::model::{FileEntity, SynchroPoint};
-use crate::diff::util::verify_permissions;
 use crate::utils::get_files_dir;
 use lazy_static::lazy_static;
 use notify::Watcher;
 use std::collections::HashMap;
-use std::io;
-use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
@@ -33,49 +29,25 @@ lazy_static! {
     };
 }
 
-pub async fn get_file(file_id: &String) -> Option<FileEntity> {
-    let file_manager = Arc::clone(&Files);
-    let mtx = file_manager.lock().await;
-    mtx.get(file_id).cloned()
-}
-
-pub async fn get_file_writer(
-    file_entity: &FileEntity,
-) -> Result<BufWriter<tokio::fs::File>, CommonThreadError> {
-    if file_entity.path.exists() && verify_permissions(&file_entity.path, true)? {
-        let file = tokio::fs::File::open(&file_entity.path).await?;
-        return Ok(BufWriter::new(file));
-    } else if !file_entity.path.exists() {
-        let default_file_dir = get_files_dir();
-        let filepath = default_file_dir.join(&file_entity.filename);
-        let file = tokio::fs::File::create_new(filepath).await?;
-        return Ok(BufWriter::new(file));
-    }
-    Err(Box::new(io::Error::new(
-        ErrorKind::NotFound,
-        "Cannot create file writer",
-    )))
-}
-
 pub mod files {
     use crate::consts::{of_type, CommonThreadError, DeviceId};
     use crate::diff::consts::MAX_FILE_SIZE_BYTES;
     use crate::diff::files::SnapshotAction::Update;
-    use crate::diff::model::{FileEntity, FileEntityDto};
+    use crate::diff::model::{from_dto, FileEntity, FileEntityDto};
     use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
     use crate::diff::Files;
-    use crate::utils::get_default_application_dir;
     use crate::utils::DirType::Cache;
+    use crate::utils::{get_default_application_dir, get_files_dir, LockExt};
     use notify::event::{DataChange, ModifyKind, RemoveKind};
     use notify::{RecommendedWatcher, RecursiveMode, Watcher};
     use std::collections::hash_map::Entry;
-    use std::fs;
     use std::fs::{copy, remove_file};
     use std::io::ErrorKind;
     use std::os::unix::prelude::OsStrExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::{fs, io};
+    use tokio::io::BufWriter;
     use tokio::sync::Notify;
     use uuid::Uuid;
 
@@ -86,12 +58,55 @@ pub mod files {
         mtx.iter().map(|(_, y)| y.to_dto()).collect()
     }
 
+    pub async fn get_file(file_id: &String) -> Option<FileEntity> {
+        let file_manager = Arc::clone(&Files);
+        let mtx = file_manager.lock().await;
+        mtx.get(file_id).cloned()
+    }
+
+    pub async fn get_file_writer(
+        file_entity: &FileEntity,
+    ) -> Result<BufWriter<tokio::fs::File>, CommonThreadError> {
+        if file_entity.path.exists() && verify_permissions(&file_entity.path, true)? {
+            let file = tokio::fs::File::open(&file_entity.path).await?;
+            return Ok(BufWriter::new(file));
+        } else if !file_entity.path.exists() {
+            let default_file_dir = get_files_dir();
+            let filepath = default_file_dir.join(&file_entity.filename);
+            let file = tokio::fs::File::create_new(filepath).await?;
+            return Ok(BufWriter::new(file));
+        }
+        Err(Box::new(io::Error::new(
+            ErrorKind::NotFound,
+            "Cannot create file writer",
+        )))
+    }
+
     pub async fn remove(file_id: &String) -> Result<(), CommonThreadError> {
         let file_manager = Files.clone();
         let mut mtx = file_manager.lock().await;
 
         mtx.remove_entry(file_id).expect("Cannot remove entry");
         Ok(())
+    }
+
+    pub async fn append(file_dto: FileEntityDto) {
+        Files
+            .with_lock(move |collection| {
+                match collection.entry(file_dto.id.clone()) {
+                    Entry::Occupied(occupied_entry) => {
+                        //todo
+                        println!("entry exists");
+                    }
+                    Entry::Vacant(vacant_entry) => match from_dto(file_dto) {
+                        None => {}
+                        Some(ent) => {
+                            vacant_entry.insert(ent);
+                        }
+                    },
+                }
+            })
+            .await;
     }
 
     pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
@@ -111,6 +126,8 @@ pub mod files {
         let file_manager = Files.clone();
         let mut current_state = file_manager.lock().await;
 
+        //todo change hash calculation to more multisystem approach, or sum calculation based on
+        // filename size + main_node postfix?
         let blake_filepath_hash = blake_digest(&path)?;
         match current_state.entry(blake3::hash(path.as_ref().as_os_str().as_bytes()).to_string()) {
             Entry::Occupied(entry) => {
@@ -133,13 +150,12 @@ pub mod files {
                         ),
                         size: metadata.len(),
                         path: PathBuf::from(path.as_ref()),
-                        is_in_sync: Arc::new(AtomicBool::new(false)),
+                        is_in_sync: false,
                         snapshot_path: None,
                         prev_hash: None,
                         current_hash: blake_filepath_hash,
                         main_node: DeviceId.clone(),
                         synced_with: vec![],
-                        last_update: None,
                         notify: Arc::new(Notify::new()),
                     },
                 );
@@ -148,7 +164,10 @@ pub mod files {
         Ok(())
     }
 
-    pub fn snapshot(file: &mut FileEntity, action: SnapshotAction) -> Result<(), CommonThreadError> {
+    pub fn snapshot(
+        file: &mut FileEntity,
+        action: SnapshotAction,
+    ) -> Result<(), CommonThreadError> {
         let mut clone = || -> Result<(), CommonThreadError> {
             if let Some(file_name) = file.path.file_name() {
                 let dir = get_default_application_dir(Cache);
@@ -204,21 +223,22 @@ pub mod files {
     pub async fn check_file_change(file: &FileEntity) -> RecommendedWatcher {
         let notify_future = Arc::clone(&file.notify);
         let file_path = file.path.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
+        let mut watcher = notify::recommended_watcher(
+            move |res: Result<notify::Event, notify::Error>| match res {
                 Ok(event) => {
                     if event.paths.contains(&file_path)
                         && (matches!(
-                        event.kind,
-                        notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))
-                    ) || matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any)))
+                            event.kind,
+                            notify::EventKind::Modify(ModifyKind::Data(DataChange::Content))
+                        ) || matches!(event.kind, notify::EventKind::Remove(RemoveKind::Any)))
                     {
                         notify_future.notify_waiters();
                     }
                 }
                 Err(e) => eprintln!("{:?}", e),
-            })
-                .expect("Cannot build watcher");
+            },
+        )
+        .expect("Cannot build watcher");
 
         watcher
             .watch(&file.path.clone(), RecursiveMode::NonRecursive)
@@ -227,7 +247,6 @@ pub mod files {
         watcher
     }
 }
-
 
 /**
 For now consider that a bullshit, cause idk how to efficiently compare two+ distinct, fairly similar, but completely different files in the network

@@ -12,11 +12,12 @@ use der::Writer;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
+use tokio::sync::Mutex;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::{fs, io};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -40,6 +41,23 @@ pub fn device_id() -> Option<String> {
     let device_id_raw = &hash_result.as_bytes()[..20];
 
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
+}
+
+pub trait LockExt<T> {
+    async fn with_lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R;
+}
+
+impl<T> LockExt<T> for Arc<Mutex<T>> {
+    async fn with_lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let self_arc = self.clone();
+        let mut data = self_arc.lock().await;
+        f(&mut data)
+    }
 }
 
 pub enum DirType {

@@ -1,14 +1,12 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
 use crate::consts::{
-    of_type, DeviceId, CA_CERT_FILE_NAME, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT,
+    of_type, DeviceId, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT,
 };
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
-use crate::diff::files::get_seeding_files;
-use crate::diff::get_file;
+use crate::diff::files::{get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
-use crate::keychain::{load_cert, load_cert_der};
 use crate::server::model::ConnectionState::{Access, Denied, Unknown};
 use crate::server::model::{
     Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
@@ -25,16 +23,12 @@ use std::fmt::format;
 use std::io::{read_to_string, ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
 use std::{fs, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
-use tokio::task::spawn_blocking;
-use tokio_rustls::TlsStream;
 
 pub(crate) mod model;
 mod util;
