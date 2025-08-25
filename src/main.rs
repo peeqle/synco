@@ -3,7 +3,7 @@ use crate::menu::display_menu;
 use crate::utils::DirType::Action;
 use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
 use lazy_static::lazy_static;
-use log::error;
+use log::{error, info};
 use std::error::Error;
 use std::fs;
 use std::ops::Deref;
@@ -67,15 +67,20 @@ fn construct() {
 }
 
 fn joins_listener() {
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
+
         let mut mtx = JoinsChannel.1.lock().await;
         while let Some(handle) = mtx.recv().await {
             let handle_id = handle.id();
+            info!("received handler {}", handle_id);
             if let Err(e) = handle.await {
                 error!("Thread: {}, threw error: {}", handle_id, e);
             }
         }
     });
+
+    JoinsChannel.0.clone().send(handle)
+        .expect("Cannot send");
 }
 
 fn load_banner() {

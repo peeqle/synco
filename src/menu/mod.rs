@@ -7,9 +7,9 @@ use crate::menu::file::FileAction;
 use crate::menu::server::ServerAction;
 use crate::menu::sync::SyncAction;
 use lazy_static::lazy_static;
-use serde::de::Error;
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::atomic::AtomicBool;
 
 lazy_static! {
     static ref ActionMap: BTreeMap<i64, Box<dyn Action + Send + Sync>> = {
@@ -76,9 +76,28 @@ pub trait Action: Send + Sync {
     fn act(&self) -> Box<dyn Fn() -> Result<bool, CommonThreadError> + Send + Sync>;
 }
 
-trait Step: Send + Sync {
+pub trait Step: Send + Sync {
     fn action(&self) -> Result<bool, CommonThreadError>;
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>>;
+    fn invoked(&self) -> bool;
     fn render(&self);
     fn display(&self) -> &str;
+}
+
+#[macro_export]
+macro_rules!  menu_step {
+
+    ($name: ident) => {
+        pub struct $name {
+            invoked: AtomicBool
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                $name {
+                    invoked: AtomicBool::new(false)
+                }
+            }
+        }
+    };
 }

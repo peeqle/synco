@@ -1,34 +1,37 @@
 use crate::consts::CommonThreadError;
+use crate::diff::files::{attach, remove};
+use crate::diff::Files;
 use crate::menu::{read_user_input, Action, Step};
+use crate::menu_step;
+use lazy_static::lazy_static;
 use log::error;
 use std::collections::LinkedList;
-use std::io;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use tokio::runtime::Runtime;
-use crate::diff::Files;
-use crate::diff::files::{attach, remove};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::SeqCst;
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct FileAction {
     current_step: Option<DStep>,
-    steps: LinkedList<DStep>,
+    steps: Arc<LinkedList<DStep>>,
+}
+
+lazy_static! {
+    static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
+        Box::new(SelectFileStep::default()) as DStep,
+        Box::new(RemoveFileStep::default()) as DStep,
+        Box::new(DisplayFilesStep::default()) as DStep,
+    ]));
 }
 
 impl Default for FileAction {
     fn default() -> Self {
-        let steps: LinkedList<DStep> = LinkedList::from(
-            [
-                Box::new(SelectFileStep {}) as DStep,
-                Box::new(RemoveFileStep {}) as DStep,
-                Box::new(DisplayFilesStep {}) as DStep,
-            ]
-        );
-
         FileAction {
             current_step: None,
-            steps,
+            steps: ActionSteps.clone(),
         }
     }
 }
@@ -43,13 +46,8 @@ impl Action for FileAction {
     }
 
     fn act(&self) -> Box<dyn Fn() -> Result<bool, CommonThreadError> + Send + Sync> {
-        Box::new(|| {
-            let steps: Vec<DStep> = vec![
-                Box::new(SelectFileStep {}),
-                Box::new(RemoveFileStep {}),
-                Box::new(DisplayFilesStep {}),
-            ];
-
+        let steps = ActionSteps.clone();
+        Box::new(move || {
             println!("Select option:");
             for (id, x) in steps.iter().enumerate() {
                 println!("\t{} {}", id, x.display());
@@ -57,7 +55,7 @@ impl Action for FileAction {
 
             match read_user_input() {
                 Ok(val) => match val.parse::<usize>() {
-                    Ok(n) if n < steps.len() => steps[n].action(),
+                    Ok(n) if n < steps.len() => steps.iter().nth(n).unwrap().action(),
                     _ => {
                         println!("Unknown option");
                         Ok(false)
@@ -72,8 +70,7 @@ impl Action for FileAction {
     }
 }
 
-
-struct SelectFileStep {}
+menu_step!(SelectFileStep);
 impl Step for SelectFileStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let mut valid_file = false;
@@ -107,6 +104,10 @@ impl Step for SelectFileStep {
         None
     }
 
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
     fn render(&self) {
         print!("Select files to attach");
     }
@@ -116,7 +117,7 @@ impl Step for SelectFileStep {
     }
 }
 
-struct DisplayFilesStep {}
+menu_step!(DisplayFilesStep);
 impl Step for DisplayFilesStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let (tx, rx) = mpsc::channel();
@@ -128,9 +129,7 @@ impl Step for DisplayFilesStep {
 
                 let formatted_strings: Vec<String> = mtx_guard
                     .iter()
-                    .map(|(_, file)| {
-                        format!("{}\t{:?}\t{}", file.id, file.path, file.current_hash)
-                    })
+                    .map(|(_, file)| format!("{}\t{:?}\t{}", file.id, file.path, file.current_hash))
                     .collect();
 
                 formatted_strings
@@ -152,6 +151,10 @@ impl Step for DisplayFilesStep {
         None
     }
 
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
     fn render(&self) {
         print!("Display attached files");
     }
@@ -161,7 +164,7 @@ impl Step for DisplayFilesStep {
     }
 }
 
-struct RemoveFileStep {}
+menu_step!(RemoveFileStep);
 impl Step for RemoveFileStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
         print!("Select file to remove: ");
@@ -177,7 +180,10 @@ impl Step for RemoveFileStep {
         match rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                return Err(Box::new(Error::new(ErrorKind::Other, format!("Cannot perform file attachment! \n {}", e))))
+                return Err(Box::new(Error::new(
+                    ErrorKind::Other,
+                    format!("Cannot perform file attachment! \n {}", e),
+                )));
             }
             Err(_) => {}
         }
@@ -186,6 +192,10 @@ impl Step for RemoveFileStep {
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
         None
+    }
+
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
     }
 
     fn render(&self) {

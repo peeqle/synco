@@ -8,32 +8,36 @@ use crate::machine_utils::get_local_ip;
 use crate::menu::{read_user_input, Action, Step};
 use crate::server::DefaultServer;
 use crate::state::InternalState;
-use crate::{broadcast, challenge, client, server, JoinsChannel};
+use crate::{broadcast, challenge, client, menu_step, server, JoinsChannel};
+use lazy_static::lazy_static;
 use log::info;
 use std::collections::{HashMap, LinkedList};
 use std::net::IpAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use std::thread;
-use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot::channel;
-use tokio::task::{spawn_blocking, JoinHandle};
+use tokio::task::spawn_blocking;
 
 type DStep = Box<dyn Step + Send + Sync>;
+lazy_static! {
+    static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
+        Box::new(StartServerStep::default()) as DStep,
+        Box::new(ListKnownDevices {}) as DStep,
+        Box::new(StartBroadcastStep::default()) as DStep,
+    ]));
+}
+
 pub struct ServerAction {
     current_step: Option<DStep>,
-    steps: LinkedList<DStep>,
+    steps: Arc<LinkedList<DStep>>,
 }
 
 impl Default for ServerAction {
     fn default() -> Self {
-        let steps: LinkedList<DStep> = LinkedList::from([
-            Box::new(StartServerStep {}) as DStep,
-            Box::new(ListKnownDevices {}) as DStep,
-        ]);
-
         ServerAction {
             current_step: None,
-            steps,
+            steps: ActionSteps.clone(),
         }
     }
 }
@@ -48,10 +52,8 @@ impl Action for ServerAction {
     }
 
     fn act(&self) -> Box<dyn Fn() -> Result<bool, CommonThreadError> + Send + Sync> {
-        Box::new(|| {
-            let steps: Vec<DStep> =
-                vec![Box::new(StartServerStep {}), Box::new(ListKnownDevices {})];
-
+        let steps = self.steps.clone();
+        Box::new(move || {
             println!("Select option:");
             for (id, x) in steps.iter().enumerate() {
                 println!("\t{} {}", id, x.display());
@@ -59,7 +61,7 @@ impl Action for ServerAction {
 
             match read_user_input() {
                 Ok(val) => match val.parse::<usize>() {
-                    Ok(n) if n < steps.len() => steps[n].action(),
+                    Ok(n) if n < steps.len() => steps.iter().nth(n).unwrap().action(),
                     _ => {
                         println!("Unknown option");
                         Ok(false)
@@ -73,18 +75,18 @@ impl Action for ServerAction {
         })
     }
 }
-
-struct StartServerStep {}
-impl Step for StartServerStep {
+menu_step!(StartBroadcastStep);
+impl Step for StartBroadcastStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        let device_manager_arc = Arc::clone(&DefaultDeviceManager);
-        let default_server = Arc::clone(&DefaultServer);
-        let device_manager_arc_for_join = device_manager_arc.clone();
+        if self.invoked.load(SeqCst) {
+            info!("Broadcast working already ...");
+            return Ok(false);
+        }
 
         let net_addr = initialize();
 
-        let challenge_manager = DefaultChallengeManager.clone();
-        let client_manager = DefaultClientManager.clone();
+        let device_manager_arc = Arc::clone(&DefaultDeviceManager);
+        let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
         let handle = tokio::spawn(async move {
             tokio::spawn(broadcast::start_broadcast_announcer(
@@ -92,13 +94,14 @@ impl Step for StartServerStep {
                 net_addr,
             ));
             tokio::spawn(broadcast::start_listener());
-            tokio::spawn(async move { server::run(default_server.clone()).await });
+            tokio::spawn(async move { device_manager_arc.start().await });
             tokio::spawn(async move { challenge::run(challenge_manager.clone()).await });
-            tokio::spawn(async move { client::run(client_manager.clone()).await });
-            tokio::spawn(async move { device_manager_arc_for_join.start().await });
         });
 
         JoinsChannel.0.clone().send(handle)?;
+
+        self.invoked.store(true, SeqCst);
+
         Ok(false)
     }
 
@@ -106,8 +109,52 @@ impl Step for StartServerStep {
         None
     }
 
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
     fn render(&self) {
-        println!("Start server");
+        println!("{}", self.display())
+    }
+
+    fn display(&self) -> &str {
+        "Allow other devices discovery"
+    }
+}
+
+menu_step!(StartServerStep);
+impl Step for StartServerStep {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+        if self.invoked.load(SeqCst) {
+            info!("Server working already ...");
+            return Ok(false);
+        }
+
+        let default_server = Arc::clone(&DefaultServer);
+        let client_manager = Arc::clone(&DefaultClientManager);
+
+        let handle = tokio::spawn(async move {
+            tokio::spawn(async move { server::run(default_server.clone()).await });
+            tokio::spawn(async move { client::run(client_manager.clone()).await });
+        });
+
+        JoinsChannel.0.clone().send(handle)?;
+
+        self.invoked.store(true, SeqCst);
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
+    fn render(&self) {
+        println!("{}", self.display());
     }
 
     fn display(&self) -> &str {
@@ -121,13 +168,12 @@ impl Step for ListKnownDevices {
         let device_manager = Arc::clone(&DefaultDeviceManager);
         let (tx, mut rx) = channel::<HashMap<String, DiscoveredDevice>>();
 
-         spawn_blocking(async move || {
+        spawn_blocking(async move || {
             let devices = {
                 let mtx = device_manager.known_devices.read().await;
                 mtx.clone()
             };
-            tx.send(devices)
-                .expect("Cannot send known devices");
+            tx.send(devices).expect("Cannot send known devices");
         });
         let known_devices = rx.try_recv().unwrap_or_default();
 
@@ -145,6 +191,10 @@ impl Step for ListKnownDevices {
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
         None
+    }
+
+    fn invoked(&self) -> bool {
+        false
     }
 
     fn render(&self) {

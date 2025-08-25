@@ -2,31 +2,37 @@ use crate::consts::CommonThreadError;
 use crate::diff::point::{remove_point, update_point};
 use crate::diff::{Files, Points};
 use crate::menu::{read_user_input, Action, Step};
+use crate::menu_step;
+use lazy_static::lazy_static;
 use log::error;
 use std::collections::LinkedList;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::{mpsc, Arc};
 use std::{fs, io};
 use tokio::runtime::{Handle, Runtime};
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct SyncAction {
     current_step: Option<DStep>,
-    steps: LinkedList<DStep>,
+    steps: Arc<LinkedList<DStep>>,
+}
+
+lazy_static! {
+    static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
+        Box::new(UpdateSyncPoint::default()) as DStep,
+        Box::new(RemoveSyncPoint::default()) as DStep,
+        Box::new(DisplaySyncPoints::default()) as DStep,
+    ]));
 }
 
 impl Default for SyncAction {
     fn default() -> Self {
-        let steps: LinkedList<DStep> = LinkedList::from([
-            Box::new(UpdateSyncPoint {}) as DStep,
-            Box::new(RemoveSyncPoint {}) as DStep,
-            Box::new(DisplaySyncPoints {}) as DStep,
-        ]);
-
         SyncAction {
             current_step: None,
-            steps,
+            steps: ActionSteps.clone(),
         }
     }
 }
@@ -41,13 +47,8 @@ impl Action for SyncAction {
     }
 
     fn act(&self) -> Box<dyn Fn() -> Result<bool, CommonThreadError> + Send + Sync> {
-        Box::new(|| {
-            let steps: Vec<DStep> = vec![
-                Box::new(UpdateSyncPoint {}),
-                Box::new(RemoveSyncPoint {}),
-                Box::new(DisplaySyncPoints {}),
-            ];
-
+        let steps = self.steps.clone();
+        Box::new(move || {
             println!("Select option:");
             for (id, x) in steps.iter().enumerate() {
                 println!("\t{} {}", id, x.display());
@@ -55,7 +56,7 @@ impl Action for SyncAction {
 
             match read_user_input() {
                 Ok(val) => match val.parse::<usize>() {
-                    Ok(n) if n < steps.len() => steps[n].action(),
+                    Ok(n) if n < steps.len() => steps.iter().nth(n).unwrap().action(),
                     _ => {
                         println!("Unknown option");
                         Ok(false)
@@ -70,8 +71,7 @@ impl Action for SyncAction {
     }
 }
 
-struct UpdateSyncPoint {
-}
+menu_step!(UpdateSyncPoint);
 impl Step for UpdateSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let handle = Handle::current();
@@ -119,8 +119,8 @@ impl Step for UpdateSyncPoint {
                                 path.clone(),
                                 enabled_input.clone(),
                             )
-                                .await
-                                .expect("Cannot send update for Point");
+                            .await
+                            .expect("Cannot send update for Point");
                             let _ = tx.send(Ok(()));
                         } else {
                             for ext in cooked_extensions {
@@ -165,6 +165,10 @@ impl Step for UpdateSyncPoint {
         None
     }
 
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
     fn render(&self) {
         print!("{}", self.display());
     }
@@ -174,7 +178,7 @@ impl Step for UpdateSyncPoint {
     }
 }
 
-struct DisplaySyncPoints {}
+menu_step!(DisplaySyncPoints);
 impl Step for DisplaySyncPoints {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let handle = Handle::current();
@@ -196,6 +200,10 @@ impl Step for DisplaySyncPoints {
         None
     }
 
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
     fn render(&self) {
         print!("{}", self.display());
     }
@@ -205,7 +213,7 @@ impl Step for DisplaySyncPoints {
     }
 }
 
-struct RemoveSyncPoint {}
+menu_step!(RemoveSyncPoint);
 impl Step for RemoveSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let handle = Handle::current();
@@ -224,6 +232,10 @@ impl Step for RemoveSyncPoint {
 
     fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
         None
+    }
+
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
     }
 
     fn render(&self) {

@@ -173,13 +173,8 @@ impl TcpClient {
     }
 }
 
-pub async fn run(_manager: Arc<ClientManager>) -> Result<(), CommonThreadError> {
-    info!("Starting client...");
-    let res = tokio::try_join!(tokio::spawn(listen(Arc::clone(&_manager))),);
-    Ok(())
-}
 
-async fn listen(_manager: Arc<ClientManager>) {
+pub async fn run(_manager: Arc<ClientManager>) {
     let handle_fn = async |x: ClientActivity| match x {
         ClientActivity::OpenConnection { device_id } => {
             let empty = {

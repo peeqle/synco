@@ -1527,6 +1527,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.106",
  "tokio",
  "tokio-rustls",
  "uuid",
@@ -1705,9 +1706,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vis"
-version = "0.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "210a5fc59b14a4eeb685a3618a9f2909fd6471dbe6a319e308a7096173359389"
+version = "0.0.1"
 dependencies = [
  "quote",
  "syn 2.0.106",
