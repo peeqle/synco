@@ -404,6 +404,9 @@ fn server_response_listener(peer: &ClientTcpPeer) {
             if let Ok(_) = locked_connection.read(&mut buffer).await {
                 if let Ok(req) = serde_json::from_slice::<ServerResponse>(&buffer) {
                     match req {
+                        ServerResponse::ChallengeRequest { device_id, nonce } => {
+
+                        }
                         ServerResponse::SeedingFiles { shared_files } => {
                             for file_data in shared_files {
                                 append(file_data).await;

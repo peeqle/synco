@@ -22,9 +22,9 @@ pub struct SyncAction {
 
 lazy_static! {
     static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
-        Box::new(UpdateSyncPoint::default()) as DStep,
-        Box::new(RemoveSyncPoint::default()) as DStep,
-        Box::new(DisplaySyncPoints::default()) as DStep,
+        Box::new(UpdateSyncPoint {}) as DStep,
+        Box::new(RemoveSyncPoint {}) as DStep,
+        Box::new(DisplaySyncPoints {}) as DStep,
     ]));
 }
 
@@ -71,7 +71,7 @@ impl Action for SyncAction {
     }
 }
 
-menu_step!(UpdateSyncPoint);
+struct UpdateSyncPoint {}
 impl Step for UpdateSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let handle = Handle::current();
@@ -166,7 +166,7 @@ impl Step for UpdateSyncPoint {
     }
 
     fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
+        false
     }
 
     fn render(&self) {
@@ -178,7 +178,7 @@ impl Step for UpdateSyncPoint {
     }
 }
 
-menu_step!(DisplaySyncPoints);
+struct DisplaySyncPoints {}
 impl Step for DisplaySyncPoints {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let handle = Handle::current();
@@ -201,7 +201,7 @@ impl Step for DisplaySyncPoints {
     }
 
     fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
+        false
     }
 
     fn render(&self) {
@@ -213,7 +213,7 @@ impl Step for DisplaySyncPoints {
     }
 }
 
-menu_step!(RemoveSyncPoint);
+struct RemoveSyncPoint {}
 impl Step for RemoveSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let handle = Handle::current();
@@ -235,7 +235,7 @@ impl Step for RemoveSyncPoint {
     }
 
     fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
+        false
     }
 
     fn render(&self) {

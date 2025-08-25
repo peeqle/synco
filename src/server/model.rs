@@ -116,8 +116,10 @@ pub struct TcpServer {
     pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
 }
 
+#[derive(Clone)]
 #[vis(pub)]
 pub struct ServerTcpPeer {
+    device_id: String,
     connection: Arc<Mutex<TlsStream<TcpStream>>>,
     connection_status: Arc<RwLock<ConnectionState>>
 }
@@ -134,10 +136,6 @@ pub enum Crud {
 pub enum ServerRequest {
     InitialRequest {
         device_id: String,
-    },
-    ChallengeRequest {
-        device_id: String,
-        nonce: Vec<u8>,
     },
     ChallengeResponse {
         device_id: String,
@@ -161,6 +159,10 @@ pub enum SigningServerRequest {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ServerResponse {
+    ChallengeRequest {
+        device_id: String,
+        nonce: Vec<u8>,
+    },
     SignedCertificate {
         device_id: String,
         cert_pem: String,
@@ -180,9 +182,9 @@ pub enum ServerResponse {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ServerActivity {
-    SendChallenge { device_id: String },
+    SendChallenge { device_id: String , connection: Arc<Mutex<TlsStream<TcpStream>>>},
     VerifiedChallenge { device_id: String },
 }
 

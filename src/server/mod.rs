@@ -110,8 +110,8 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                         tls_stream,
                         connecting_device_option,
                     )
-                        .await
-                        .expect("Cannot handle device session");
+                    .await
+                    .expect("Ca,npub device_id: String,not handle device session");
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -130,10 +130,12 @@ async fn handle_device_connection(
         let (res_sender, mut res_receiver) = mpsc::channel::<ServerResponse>(100);
 
         {
-            let mut connected_devices_arc = server_arc.connected_devices.lock().await;
-            let device_connection = connected_devices_arc
+            let cp = server_arc.connected_devices.clone();
+            let mut mtx = cp.lock().await;
+            let device_connection = mtx
                 .entry(connecting_device.device_id.clone())
                 .or_insert_with(|| ServerTcpPeer {
+                    device_id: connecting_device.device_id.clone(),
                     connection: Arc::new(Mutex::new(tls_stream)),
                     connection_status: Arc::new(RwLock::new(Unknown)),
                 });
@@ -170,14 +172,13 @@ async fn open_device_connection(
     device_connection: &mut ServerTcpPeer,
     sender: Sender<ServerResponse>,
 ) {
-    let connection = device_connection.connection.clone();
-    let connection_status = device_connection.connection_status.clone();
+    let cp = device_connection.clone();
 
     tokio::spawn(async move {
         loop {
-            let current_status = connection_status.read().await;
+            let current_status = cp.connection_status.read().await;
 
-            if let Ok(frame) = receive_frame(connection.clone()).await {
+            if let Ok(frame) = receive_frame(cp.connection.clone()).await {
                 match *current_status {
                     Access => {
                         match frame {
@@ -186,7 +187,7 @@ async fn open_device_connection(
                             }
                             ServerRequest::FileRequest(file_id) => {
                                 if let Some(file) = get_file(&file_id).await {
-                                    send_file_chunked(connection.clone(), &file)
+                                    send_file_chunked(cp.connection.clone(), &file)
                                         .await
                                         .expect("Error while sending file");
                                 }
@@ -209,9 +210,29 @@ async fn open_device_connection(
                             }
                         }
                     }
+                    Denied => {
+                        sender
+                            .send(ServerResponse::Error {
+                                message: "Denied".to_string(),
+                            })
+                            .await
+                            .expect("Cannot send");
+                    }
+                    Unknown => {
+                        let server_manager = Arc::clone(&DefaultServer);
+                        server_manager
+                            .bounded_channel
+                            .0
+                            .clone()
+                            .send(ServerActivity::SendChallenge {
+                                device_id: cp.device_id.clone(),
+                                connection: cp.connection.clone(),
+                            })
+                            .await
+                            .expect("Cannot send");
+                    }
                     _ => match frame {
                         ServerRequest::InitialRequest { .. } => {}
-                        ServerRequest::ChallengeRequest { .. } => {}
                         ServerRequest::ChallengeResponse { .. } => {}
                         ServerRequest::AcceptConnection(_) => {}
                         ServerRequest::RejectConnection(_) => {}
@@ -230,60 +251,27 @@ async fn open_device_connection(
     });
 }
 
-async fn listen_actions(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError> {
     let server_cp = Arc::clone(&server);
 
     let mut receiver = server_cp.bounded_channel.1.lock().await;
     while let Some(message) = receiver.recv().await {
-        handle_receiver_message(server_cp.clone(), message).await?;
-    }
-    Ok(())
-}
-
-async fn handle_receiver_message(
-    server: Arc<TcpServer>,
-    message: ServerActivity,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    match message {
-        ServerActivity::SendChallenge { device_id } => {
-            info!("Received new connection request to: {}", &device_id);
-            let mut cp = server.connected_devices.lock().await;
-            let mut _device = cp.get_mut(&device_id);
-
-            // if _device.is_some() {
-            //     let device_connection = _device.unwrap();
-            //     if device_connection.connection_status == Unknown {
-            //         if let Some(d_device) = get_device(device_id.clone()).await {
-            //             let mut mutex = device_connection.connection.lock().await;
-            //             // match send_challenge(d_device, &mut mutex).await {
-            //             //     Ok(_) => {
-            //             //         device_connection.connection_status = Pending;
-            //             //     }
-            //             //     Err(_) => {}
-            //             // }
-            //         }
-            //     }
-            //
-            //     if device_connection.connection_status == Denied {
-            //         return Err(Box::new(io::Error::new(
-            //             ErrorKind::AlreadyExists,
-            //             "Connection is denied",
-            //         )));
-            //     }
-            //     if device_connection.connection_status == Access {
-            //         return Err(Box::new(io::Error::new(
-            //             ErrorKind::AlreadyExists,
-            //             "Connection is already opened",
-            //         )));
-            //     }
-            // }
-        }
-        ServerActivity::VerifiedChallenge { device_id } => {
-            let mut cp = server.connected_devices.lock().await;
-            let mut _device = cp.get_mut(&device_id);
-            if let Some(device) = _device {
-                let mut mtx = device.connection_status.write().await;
-                *mtx = Access;
+        match message {
+            ServerActivity::SendChallenge {
+                device_id,
+                connection,
+            } => {
+                if let Ok(challenge) = get_serialized_challenge(device_id).await {
+                    send_framed(connection.clone(), challenge).await?;
+                }
+            }
+            ServerActivity::VerifiedChallenge { device_id } => {
+                let mut cp = server.connected_devices.lock().await;
+                let mut _device = cp.get_mut(&device_id);
+                if let Some(device) = _device {
+                    let mut mtx = device.connection_status.write().await;
+                    *mtx = Access;
+                }
             }
         }
     }
@@ -298,34 +286,10 @@ async fn send_response_to_client(
     send_framed(connection, serialized).await
 }
 
-async fn send_challenge(
-    device: DiscoveredDevice,
-    connection: &mut ServerConnection,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if let Ok(ser) = get_serialized_challenge(device.clone()).await {
-        if let Err(e) = connection.writer().write_all(&ser) {
-            eprintln!("Failed to write challenge: {}", e);
-            Err(Box::new(io::Error::new(
-                ErrorKind::Interrupted,
-                format!("Failed to write challenge: {}", e),
-            )))
-        } else {
-            println!("Sent challenge to: {}", device.device_id.to_string());
-            Ok(())
-        }
-    } else {
-        eprintln!("Failed to serialize challenge.");
-        Err(Box::new(io::Error::new(
-            ErrorKind::Interrupted,
-            "Failed to serialize challenge.",
-        )))
-    }
-}
-
 async fn get_serialized_challenge(
-    device: DiscoveredDevice,
+    device_id: String,
 ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
-    let challenge_query = generate_challenge(device.device_id.clone()).await?;
+    let challenge_query = generate_challenge(device_id.clone()).await?;
     let serialized = serde_json::to_vec(&challenge_query)?;
     Ok(serialized)
 }

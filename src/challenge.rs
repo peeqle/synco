@@ -4,7 +4,7 @@ use crate::client::DefaultClientManager;
 use crate::consts::CHALLENGE_DEATH;
 use crate::device_manager::{get_device, DefaultDeviceManager};
 use crate::keychain;
-use crate::server::model::{ConnectionState, ServerActivity, ServerRequest, ServerTcpPeer, StaticCertResolver, TcpServer};
+use crate::server::model::{ConnectionState, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, StaticCertResolver, TcpServer};
 use crate::server::DefaultServer;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
@@ -46,12 +46,8 @@ pub struct ChallengeManager {
 }
 
 pub enum ChallengeEvent {
-    NewDevice {
-        device_id: String,
-    },
-    ChallengeVerification {
-        connection_response: ServerRequest,
-    },
+    NewDevice { device_id: String },
+    ChallengeVerification { connection_response: ServerRequest },
 }
 
 #[derive(PartialEq, Clone)]
@@ -208,14 +204,14 @@ async fn verify_challenge(
 
     match challenge {
         Some(Active {
-                 socket_addr,
-                 nonce,
-                 nonce_hash,
-                 salt,
-                 passphrase,
-                 mut attempts,
-                 ttl,
-             }) => {
+            socket_addr,
+            nonce,
+            nonce_hash,
+            salt,
+            passphrase,
+            mut attempts,
+            ttl,
+        }) => {
             match decrypt_with_passphrase(
                 verification_body.as_slice(),
                 &nonce.try_into().unwrap(),
@@ -282,7 +278,7 @@ async fn verify_challenge(
 */
 pub async fn generate_challenge(
     device_id: String,
-) -> Result<ServerRequest, Box<dyn Error + Send + Sync>> {
+) -> Result<ServerResponse, Box<dyn Error + Send + Sync>> {
     debug!("Generating a challenge for: {}", device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
     let result = encrypt_with_passphrase(nonce_uuid_hash.as_bytes(), b"key").unwrap();
@@ -325,7 +321,7 @@ pub async fn generate_challenge(
         },
     }
 
-    Ok(ServerRequest::ChallengeRequest {
+    Ok(ServerResponse::ChallengeRequest {
         device_id: device_id.clone(),
         nonce: result.0,
     })

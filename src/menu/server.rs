@@ -206,6 +206,57 @@ impl Step for ListKnownDevices {
     }
 }
 
+struct ListChallenges {}
+impl Step for ListChallenges {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        false
+    }
+
+    fn render(&self) {
+        println!("{}", self.display());
+    }
+
+    fn display(&self) -> &str {
+        "List requested server challenges"
+    }
+}
+
+
+struct CompleteChallenge {}
+impl Step for CompleteChallenge {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        false
+    }
+
+    fn render(&self) {
+        println!("{}", self.display());
+    }
+
+    fn display(&self) -> &str {
+        "Complete selected server challenge"
+    }
+}
+
 fn initialize() -> IpAddr {
     let internal_state = InternalState::new().with_passphrase("bonkers".to_string());
 

@@ -21,9 +21,9 @@ pub struct FileAction {
 
 lazy_static! {
     static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
-        Box::new(SelectFileStep::default()) as DStep,
-        Box::new(RemoveFileStep::default()) as DStep,
-        Box::new(DisplayFilesStep::default()) as DStep,
+        Box::new(SelectFileStep {}) as DStep,
+        Box::new(RemoveFileStep {}) as DStep,
+        Box::new(DisplayFilesStep {}) as DStep,
     ]));
 }
 
@@ -70,7 +70,7 @@ impl Action for FileAction {
     }
 }
 
-menu_step!(SelectFileStep);
+struct SelectFileStep {}
 impl Step for SelectFileStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let mut valid_file = false;
@@ -105,7 +105,7 @@ impl Step for SelectFileStep {
     }
 
     fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
+        false
     }
 
     fn render(&self) {
@@ -117,7 +117,7 @@ impl Step for SelectFileStep {
     }
 }
 
-menu_step!(DisplayFilesStep);
+struct DisplayFilesStep {}
 impl Step for DisplayFilesStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let (tx, rx) = mpsc::channel();
@@ -152,7 +152,7 @@ impl Step for DisplayFilesStep {
     }
 
     fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
+       false
     }
 
     fn render(&self) {
@@ -164,7 +164,7 @@ impl Step for DisplayFilesStep {
     }
 }
 
-menu_step!(RemoveFileStep);
+struct RemoveFileStep {}
 impl Step for RemoveFileStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
         print!("Select file to remove: ");
@@ -195,7 +195,7 @@ impl Step for RemoveFileStep {
     }
 
     fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
+        false
     }
 
     fn render(&self) {
