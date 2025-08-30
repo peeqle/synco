@@ -56,6 +56,7 @@ pub enum ChallengeEvent {
 
 #[derive(PartialEq, Clone)]
 pub enum DeviceChallengeStatus {
+    //outcoming
     Active {
         socket_addr: SocketAddr,
         nonce: Vec<u8>,
@@ -65,6 +66,7 @@ pub enum DeviceChallengeStatus {
         attempts: u8,
         ttl: Instant,
     },
+    //incoming
     Pending {
         socket_addr: SocketAddr,
         nonce: Vec<u8>,

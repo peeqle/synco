@@ -10,6 +10,7 @@ use crate::consts::{
 use crate::device_manager::DefaultDeviceManager;
 use crate::diff::files::{append, get_file, get_file_writer};
 use crate::diff::{files::get_seeding_files, Files};
+use crate::get_handle;
 use crate::keychain::node::load::{
     load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der,
     node_cert_exists,
@@ -41,9 +42,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{io, mem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::unix::pipe::Sender;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
@@ -52,7 +54,7 @@ lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
         let (sender, receiver) = mpsc::channel::<ClientActivity>(500);
         Arc::new(ClientManager {
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(RwLock::new(HashMap::new())),
             bounded_channel: (sender, Mutex::new(receiver)),
         })
     };
@@ -72,8 +74,26 @@ pub enum ClientActivity {
 }
 
 pub struct ClientManager {
-    connections: Arc<Mutex<HashMap<String, TcpClient>>>,
-    pub bounded_channel: (Sender<ClientActivity>, Mutex<Receiver<ClientActivity>>),
+    connections: Arc<RwLock<HashMap<String, TcpClient>>>,
+    pub bounded_channel: (
+        mpsc::Sender<ClientActivity>,
+        Mutex<Receiver<ClientActivity>>,
+    ),
+}
+
+pub async fn get_client_sender(device_id: String) -> Option<mpsc::Sender<ServerRequest>> {
+    let cp = DefaultClientManager.clone();
+    let mtx = cp.connections.read().await;
+
+    if let Some(client) = mtx.get(&device_id) {
+        let cp = client.connection.clone();
+        let mtx = cp.lock().await;
+
+        if let Some(conn) = mtx.as_ref() {
+            return Some(conn.sender.clone());
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +106,7 @@ pub struct TcpClient {
 pub struct ClientTcpPeer {
     pub connection: Arc<Mutex<tokio_rustls::client::TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
-    pub sender: Sender<ServerRequest>,
+    pub sender: mpsc::Sender<ServerRequest>,
 }
 
 impl TcpClient {
@@ -198,7 +218,7 @@ pub async fn run(_manager: Arc<ClientManager>) {
         ClientActivity::OpenConnection { device_id } => {
             let empty = {
                 let cp = Arc::clone(&DefaultClientManager);
-                !cp.connections.lock().await.contains_key(&device_id)
+                !cp.connections.read().await.contains_key(&device_id)
             };
 
             if empty {
@@ -312,7 +332,7 @@ pub async fn run(_manager: Arc<ClientManager>) {
         }
         ClientActivity::ChangeStatus { device_id, status } => {
             let cp = Arc::clone(&DefaultClientManager);
-            let mut mtx = cp.connections.lock().await;
+            let mut mtx = cp.connections.write().await;
 
             if let Some(_device) = mtx.get_mut(&device_id) {
                 _device.update_client_status(status);
@@ -412,7 +432,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     //new client append
     {
         let manager = Arc::clone(&DefaultClientManager);
-        let mut connections = manager.connections.lock().await;
+        let mut connections = manager.connections.write().await;
         connections.insert(device.device_id.clone(), client);
     }
 
@@ -473,20 +493,23 @@ fn server_response_listener(peer: &ClientTcpPeer) {
 
 async fn client_request_listener(server_id: &String, mut client_receiver: Receiver<ServerRequest>) {
     let manager = Arc::clone(&DefaultClientManager);
-    let mut connections = manager.connections.lock().await;
+    let connections = manager.connections.read().await;
 
-    if let Some(device) = connections.get_mut(server_id).cloned() {
+    if let Some(device) = connections.get(server_id).cloned() {
         let peer_mtx = device.connection.lock().await;
         if peer_mtx.as_ref().is_none() {
             error!("Cannot find opened connection for device: {}", server_id);
         } else if let Some(connector) = peer_mtx.as_ref() {
             let connection_arc = connector.connection.clone();
+
             tokio::spawn(async move {
-                while let Some(message) = client_receiver.recv().await {
-                    let serialized = serde_json::to_vec(&message).expect("Cannot serialize");
-                    send_framed(connection_arc.clone(), serialized)
-                        .await
-                        .expect(&format!("Cannot send request to the server: {:?}", message));
+                loop {
+                    if let Some(message) = client_receiver.recv().await {
+                        let serialized = serde_json::to_vec(&message).expect("Cannot serialize");
+                        send_framed(connection_arc.clone(), serialized)
+                            .await
+                            .expect(&format!("Cannot send request to the server: {:?}", message));
+                    }
                 }
             });
         }
