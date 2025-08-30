@@ -1,25 +1,23 @@
-use crate::consts::{
-    DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR,
-    DEFAULT_SERVER_CERT_STORAGE,
-};
-use crate::keychain::DEVICE_SIGNING_KEY;
+use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR, DEFAULT_SERVER_CERT_STORAGE};
+use crate::keychain::{get_signing_key, DEVICE_SIGNING_KEY};
 use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use base32::Alphabet;
 use der::Writer;
+use ed25519_dalek::ed25519::signature::SignerMut;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
-use tokio::sync::Mutex;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::{fs, io};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 pub mod control {
     use std::error::Error;
@@ -29,22 +27,23 @@ pub mod control {
     }
 }
 
+//todo consider validation via key exchange to prevent mma thru id impersonation
+//local networks are basically safe and directories are restricted via .share bounds
 pub fn device_id() -> Option<String> {
-    let cp = Arc::clone(&DEVICE_SIGNING_KEY);
-
+    let cp = get_signing_key();
     let public_key_bytes = cp.verifying_key().to_bytes();
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(&public_key_bytes);
     let hash_result = hasher.finalize();
 
-    let device_id_raw = &hash_result.as_bytes()[..20];
+    let device_id_raw = &hash_result.as_bytes()[..8];
 
     Some(base32::encode(Alphabet::Rfc4648 { padding: false }, device_id_raw).to_uppercase())
 }
 
 pub trait LockExt<T> {
-    async fn with_lock<F, R>(&self, f: F) -> R
+    async fn with_lock<F: Send + Sync, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut T) -> R;
 }

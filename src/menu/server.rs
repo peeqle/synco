@@ -1,5 +1,5 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::challenge::DefaultChallengeManager;
+use crate::challenge::{ChallengeManager, DefaultChallengeManager, DeviceChallengeStatus};
 use crate::client::DefaultClientManager;
 use crate::consts::{CommonThreadError, DeviceId, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
@@ -8,15 +8,18 @@ use crate::machine_utils::get_local_ip;
 use crate::menu::{read_user_input, Action, Step};
 use crate::server::DefaultServer;
 use crate::state::InternalState;
-use crate::{broadcast, challenge, client, menu_step, server, JoinsChannel};
+use crate::utils::encrypt_with_passphrase;
+use crate::{broadcast, challenge, client, get_handle, menu_step, server, JoinsChannel};
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::{HashMap, LinkedList};
+use std::future::Pending;
 use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use tokio::sync::oneshot::channel;
+use tokio::sync::oneshot::error::RecvError;
+use tokio::sync::oneshot::{self, channel};
 use tokio::task::spawn_blocking;
 
 type DStep = Box<dyn Step + Send + Sync>;
@@ -25,6 +28,8 @@ lazy_static! {
         Box::new(StartServerStep::default()) as DStep,
         Box::new(ListKnownDevices {}) as DStep,
         Box::new(StartBroadcastStep::default()) as DStep,
+        Box::new(ListChallenges {}) as DStep,
+        Box::new(CompleteChallenge {}) as DStep,
     ]));
 }
 
@@ -168,7 +173,7 @@ impl Step for ListKnownDevices {
         let device_manager = Arc::clone(&DefaultDeviceManager);
         let (tx, mut rx) = channel::<HashMap<String, DiscoveredDevice>>();
 
-        spawn_blocking(async move || {
+        get_handle().spawn_blocking(async move || {
             let devices = {
                 let mtx = device_manager.known_devices.read().await;
                 mtx.clone()
@@ -209,7 +214,56 @@ impl Step for ListKnownDevices {
 struct ListChallenges {}
 impl Step for ListChallenges {
     fn action(&self) -> Result<bool, CommonThreadError> {
+        get_handle().spawn_blocking(async move || {
+            let challenges = {
+                let challenge_manager = Arc::clone(&DefaultChallengeManager);
+                challenge_manager.current_challenges.read().await.clone()
+            };
 
+            println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
+            for (id, (i, ch)) in challenges.iter().enumerate() {
+                match ch {
+                    DeviceChallengeStatus::Active {
+                        socket_addr,
+                        nonce,
+                        nonce_hash,
+                        salt,
+                        passphrase,
+                        attempts,
+                        ttl,
+                    } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            attempts,
+                            ch.name()
+                        );
+                    }
+                    DeviceChallengeStatus::Closed { socket_addr } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            "-",
+                            ch.name()
+                        );
+                    }
+                    DeviceChallengeStatus::Pending {socket_addr,  nonce } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            "-",
+                            ch.name()
+                        );
+                    }
+                }
+            }
+        });
 
         Ok(false)
     }
@@ -231,11 +285,61 @@ impl Step for ListChallenges {
     }
 }
 
-
 struct CompleteChallenge {}
 impl Step for CompleteChallenge {
     fn action(&self) -> Result<bool, CommonThreadError> {
+        ListChallenges {}.action()?;
 
+        println!("Select option:");
+        match read_user_input() {
+            Ok(val) => match val.parse::<usize>() {
+                Ok(n) => {
+                    let (tx, rx) =
+                        oneshot::channel::<HashMap<String, DeviceChallengeStatus>>();
+                    get_handle().spawn_blocking(async move || {
+                        let challenges = {
+                            let challenge_manager = Arc::clone(&DefaultChallengeManager);
+                            challenge_manager.current_challenges.read().await.clone()
+                        };
+
+                        let _ = tx.send(challenges);
+                    });
+
+                    match rx.blocking_recv() {
+                        Ok(challenges) => {
+                            let (device_id, challenge) = challenges
+                                .iter()
+                                .nth(n)
+                                .expect(&format!("Cannot find entry at {}", n));
+
+                            match challenge {
+                                DeviceChallengeStatus::Pending { nonce, .. } => {
+                                    println!("Enter passphrase: ");
+                                    let passphrase =
+                                        read_user_input().expect("Cannot read provided bytes");
+
+                                    let (ciphertext_with_tag, iv_bytes, salt) =
+                                        encrypt_with_passphrase(&*nonce, passphrase.as_bytes())
+                                            .expect("Cannot encrypt");
+
+                                    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+                                }
+                                _ => {
+                                    println!("Cannot activate that channel");
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                _ => {
+                    println!("Unknown option");
+                }
+            },
+            Err(_) => {
+                println!("Cannot read user input");
+            }
+        }
 
         Ok(false)
     }

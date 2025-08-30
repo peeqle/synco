@@ -182,6 +182,23 @@ async fn open_device_connection(
                 match *current_status {
                     Access => {
                         match frame {
+                            ServerRequest::ChallengeResponse {
+                                iv_bytes,
+                                salt,
+                                ciphertext_with_tag,
+                            } => {
+                                let challenge_manager = DefaultChallengeManager.clone();
+                                challenge_manager
+                                    .get_sender()
+                                    .send(ChallengeEvent::ChallengeVerification {
+                                        device_id: cp.device_id.clone(),
+                                        iv_bytes,
+                                        salt,
+                                        ciphertext_with_tag,
+                                    })
+                                    .await
+                                    .expect("Cannot send");
+                            }
                             ServerRequest::RejectConnection(_) => {
                                 //todo
                             }

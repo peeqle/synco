@@ -1,21 +1,15 @@
-use crate::broadcast::DiscoveredDevice;
-use crate::client::ClientActivity::OpenConnection;
+use crate::challenge::DeviceChallengeStatus::{Closed, Pending};
+use crate::client::ClientActivity::{ChangeStatus, OpenConnection};
 use crate::client::DefaultClientManager;
-use crate::consts::CHALLENGE_DEATH;
-use crate::device_manager::{get_device, DefaultDeviceManager};
-use crate::keychain;
-use crate::server::model::{ConnectionState, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, StaticCertResolver, TcpServer};
+use crate::consts::{CommonThreadError, CHALLENGE_DEATH};
+use crate::device_manager::get_device;
+use crate::server::model::{ConnectionState, ServerResponse};
 use crate::server::DefaultServer;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::aes::Aes128;
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use lazy_static::lazy_static;
-use log::{debug, info};
-use rustls::compress::default_cert_compressors;
-use std::any::Any;
+use log::debug;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::error::Error;
@@ -24,12 +18,13 @@ use std::io::{ErrorKind, Read};
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
+use crate::server::model::ConnectionState::{Access, Denied};
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -40,14 +35,25 @@ lazy_static! {
 
 pub struct ChallengeManager {
     //device_id -> _, nonce hash, ttl
-    pub(crate) current_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
+    pub current_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
     //receiver for emitted connection event
     bounded_channel: (Sender<ChallengeEvent>, Mutex<Receiver<ChallengeEvent>>),
 }
 
 pub enum ChallengeEvent {
-    NewDevice { device_id: String },
-    ChallengeVerification { connection_response: ServerRequest },
+    NewDevice {
+        device_id: String,
+    },
+    NewChallengeRequest {
+        device_id: String,
+        nonce: Vec<u8>,
+    },
+    ChallengeVerification {
+        device_id: String,
+        iv_bytes: [u8; 12],
+        salt: [u8; 16],
+        ciphertext_with_tag: Vec<u8>,
+    },
 }
 
 #[derive(PartialEq, Clone)]
@@ -58,12 +64,26 @@ pub enum DeviceChallengeStatus {
         nonce_hash: Vec<u8>,
         salt: Vec<u8>,
         passphrase: Vec<u8>,
-        attempts: i16,
+        attempts: u8,
         ttl: Instant,
+    },
+    Pending {
+        socket_addr: SocketAddr,
+        nonce: Vec<u8>,
     },
     Closed {
         socket_addr: SocketAddr,
     },
+}
+
+impl DeviceChallengeStatus {
+    pub fn name(&self) -> &str {
+        match &self {
+            Active { .. } => "ACTIVE",
+            DeviceChallengeStatus::Pending { .. } => "PENDING",
+            DeviceChallengeStatus::Closed { .. } => "CLOSED",
+        }
+    }
 }
 
 //todo replace with actual errors
@@ -83,12 +103,12 @@ impl ConnectionStatusVerification for DeviceChallengeStatus {
                 if now.ge(ttl) {
                     return Ok(false);
                 }
-                if *attempts <= 0i16 {
+                if *attempts == 0u8 {
                     return Ok(false);
                 }
                 Ok(true)
             }
-            DeviceChallengeStatus::Closed { .. } => Ok(true),
+            _ => Ok(true),
         }
     }
 }
@@ -109,7 +129,7 @@ impl ChallengeManager {
 
     pub async fn can_request_new_connection(&self, device_id: &String) -> bool {
         let challenges = self.current_challenges.read().await;
-        challenges.contains_key(device_id)
+        !challenges.contains_key(device_id)
     }
 }
 
@@ -154,6 +174,7 @@ pub async fn cleanup() {
                         );
                         false
                     }
+                    _ => true,
                 });
         }
         sleep(Duration::from_secs(15)).await;
@@ -161,29 +182,97 @@ pub async fn cleanup() {
 }
 
 /**
-* listen to the device manager and initiate device verification for device
+* listen to the device manager and initiate device verification
 */
-pub async fn challenge_listener(
-    manager: Arc<ChallengeManager>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), CommonThreadError> {
     let challenge_manager = manager.clone();
-    let _client = Arc::clone(&DefaultClientManager);
+    let client_manager = Arc::clone(&DefaultClientManager);
 
     let receiver_mutex = &challenge_manager.bounded_channel.1;
     loop {
         let mut receiver = receiver_mutex.lock().await;
-        tokio::select! {
-           Some(message) = receiver.recv() => {
-                match message {
-                    ChallengeEvent::NewDevice { device_id } => {
-                        _client.bounded_channel.0
+
+        if let Some(message) = receiver.recv().await {
+            match message {
+                ChallengeEvent::NewDevice { device_id } => {
+                    client_manager
+                        .bounded_channel
+                        .0
                         .send(OpenConnection {
-                            device_id: device_id.clone()
-                        }).await.expect(&format!("Cannot send request for establishing new connection: {}", device_id));
+                            device_id: device_id.clone(),
+                        })
+                        .await
+                        .expect(&format!(
+                            "Cannot send request for establishing new connection: {}",
+                            device_id
+                        ));
+                }
+
+                ChallengeEvent::ChallengeVerification {
+                    device_id,
+                    iv_bytes,
+                    salt,
+                    ciphertext_with_tag,
+                } => {
+                    let (is_valid, close_connection) =
+                        verify_challenge(&device_id, iv_bytes, salt, ciphertext_with_tag).await?;
+
+                    if is_valid {
+                        client_manager
+                            .bounded_channel
+                            .0
+                            .send(ChangeStatus {
+                                device_id: device_id.clone(),
+                                status: Access
+                            })
+                            .await
+                            .expect(&format!(
+                                "Cannot send request for changing status: {}",
+                                device_id
+                            ));
+                    }else {
+                        if close_connection {
+                            client_manager
+                                .bounded_channel
+                                .0
+                                .send(ChangeStatus {
+                                    device_id: device_id.clone(),
+                                    status: Denied
+                                })
+                                .await
+                                .expect(&format!(
+                                    "Cannot send request for changing status: {}",
+                                    device_id
+                                ));
+                        }
                     }
-                    ChallengeEvent::ChallengeVerification { connection_response } => {
-                        if let ServerRequest::ChallengeResponse { device_id, response } = connection_response {
-                            verify_challenge(device_id, response).await?;
+                }
+                ChallengeEvent::NewChallengeRequest { device_id, nonce } => {
+                    let device = get_device(&device_id).await;
+                    if let Some(_device) = device {
+                        let mut mtx = challenge_manager.current_challenges.write().await;
+                        match mtx.entry(device_id.clone()) {
+                            Entry::Occupied(ent) => match ent.get() {
+                                Active { .. } => {}
+                                _ => {
+                                    mtx.insert(
+                                        device_id,
+                                        Pending {
+                                            socket_addr: _device.connect_addr.clone(),
+                                            nonce,
+                                        },
+                                    );
+                                }
+                            },
+                            Entry::Vacant(_) => {
+                                mtx.insert(
+                                    device_id,
+                                    Pending {
+                                        socket_addr: _device.connect_addr.clone(),
+                                        nonce,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -193,83 +282,59 @@ pub async fn challenge_listener(
 }
 
 async fn verify_challenge(
-    device_id: String,
-    verification_body: Vec<u8>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+    device_id: &String,
+    iv_bytes: [u8; 12],
+    salt: [u8; 16],
+    ciphertext_with_tag: Vec<u8>,
+    //is_valid, close_connection
+) -> Result<(bool,bool), CommonThreadError> {
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
-    let challenge = {
-        let challenges = challenge_manager.current_challenges.read().await;
-        challenges.get(&device_id).cloned()
-    };
 
-    match challenge {
-        Some(Active {
-            socket_addr,
-            nonce,
-            nonce_hash,
-            salt,
-            passphrase,
-            mut attempts,
-            ttl,
-        }) => {
-            match decrypt_with_passphrase(
-                verification_body.as_slice(),
-                &nonce.try_into().unwrap(),
-                &salt.try_into().unwrap(),
-                passphrase.as_slice(),
-            ) {
-                Ok(_) => {
-                    Arc::clone(&DefaultServer)
-                        .bounded_channel
-                        .0
-                        .send(ServerActivity::VerifiedChallenge {
-                            device_id: device_id.clone(),
-                        })
-                        .await?;
+    let mut challenges = challenge_manager.current_challenges.write().await;
+    let sent_challenge = challenges.get_mut(device_id);
 
-                    challenge_manager
-                        .current_challenges
-                        .write()
-                        .await
-                        .remove(&device_id);
-                }
-                Err(e) => {
-                    eprintln!("Decryption error {}: {:?}", device_id, e);
+    if let Some(challenge) = sent_challenge {
+        match challenge {
+            Active {
+                passphrase,
+                nonce_hash,
+                attempts,
+                socket_addr,
+                ..
+            } => {
+                let decrypted_hash =
+                    decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, &passphrase)
+                        .expect("Cannot decrypt");
 
-                    if attempts > 0 {
-                        attempts -= 1;
-                        let mut challenges_guard =
-                            challenge_manager.current_challenges.write().await;
-                        if let Some(entry) = challenges_guard.get_mut(&device_id) {
-                            if let Active {
-                                attempts: current_attempts,
-                                ..
-                            } = entry
-                            {
-                                *current_attempts = attempts;
-                            }
-                        }
-                        if attempts == 0 {
-                            challenges_guard.remove(&device_id);
-                        }
-                    } else {
-                        challenge_manager
-                            .current_challenges
-                            .write()
-                            .await
-                            .remove(&device_id);
+                if !decrypted_hash.eq(nonce_hash) {
+                    *attempts -= 1;
+
+                    if *attempts == 0u8 {
+                        let mut challenges = challenge_manager.current_challenges.write().await;
+                        challenges.remove_entry(device_id);
+
+                        challenges.insert(
+                            device_id.clone(),
+                            Closed {
+                                socket_addr: socket_addr.clone(),
+                            },
+                        );
+                        return Ok((false,true))
                     }
-                    return Err(Box::new(io::Error::new(
-                        ErrorKind::BrokenPipe,
-                        format!("Decryption error: {}", device_id),
-                    )));
+
+                    return Ok((false, false));
+                } else {
+                    let mut challenges = challenge_manager.current_challenges.write().await;
+                    challenges.remove_entry(device_id);
+
+                    return Ok((true, false));
                 }
-            };
+            }
+            _ => {}
         }
-        Some(DeviceChallengeStatus::Closed { .. }) => {}
-        None => {}
     }
-    Ok(())
+
+    Ok((false, false))
 }
 
 /**
@@ -290,7 +355,7 @@ pub async fn generate_challenge(
         .write()
         .await;
 
-    match get_device(device_id.clone()).await {
+    match get_device(&device_id).await {
         None => {
             return Err(Box::new(io::Error::new(
                 ErrorKind::NotFound,

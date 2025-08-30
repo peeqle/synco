@@ -12,11 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
-use std::{default, io};
 use std::io::ErrorKind;
 use std::net::IpAddr;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc};
+use std::sync::Arc;
+use std::{default, io};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
@@ -138,9 +137,9 @@ pub enum ServerRequest {
         device_id: String,
     },
     ChallengeResponse {
-        device_id: String,
-        //encoded BLAKE3 x ed25519 string
-        response: Vec<u8>,
+        iv_bytes: [u8;12],
+        salt: [u8;16],
+        ciphertext_with_tag: Vec<u8>
     },
     AcceptConnection(String),
     RejectConnection(String),
@@ -161,7 +160,7 @@ pub enum SigningServerRequest {
 pub enum ServerResponse {
     ChallengeRequest {
         device_id: String,
-        nonce: Vec<u8>,
+        nonce: Vec<u8>
     },
     SignedCertificate {
         device_id: String,
@@ -188,7 +187,7 @@ pub enum ServerActivity {
     VerifiedChallenge { device_id: String },
 }
 
-#[derive(Clone, PartialEq, Default, Debug)]
+#[derive(Clone, PartialEq, Default, Debug, Serialize, Deserialize)]
 pub enum ConnectionState {
     #[default]
     Unknown,

@@ -1,31 +1,50 @@
-use crate::consts::{CommonThreadError, DeviceId, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME, PRIVATE_KEY_FILE_NAME, SIGNING_KEY};
+use crate::consts::{
+    CommonThreadError, DeviceId, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME,
+    PRIVATE_KEY_FILE_NAME, SIGNING_KEY,
+};
+use crate::get_handle;
 use crate::keychain::server::generate_root_ca;
 use crate::utils::DirType::Action;
-use crate::utils::{get_default_application_dir, get_server_cert_storage};
+use crate::utils::{get_default_application_dir, get_server_cert_storage, LockExt};
 use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use ed25519_dalek::{Signature, Signer, SigningKey};
+use ed25519_dalek::{Signer, SigningKey};
 use error::Error;
 use lazy_static::lazy_static;
 use rand::rngs::OsRng;
-use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519,
+};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Cursor, ErrorKind, Read, Write};
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{error, fs, io};
+use tokio::sync::{oneshot, Mutex};
 
 lazy_static! {
-    pub static ref DEVICE_SIGNING_KEY: Arc<SigningKey> = {
+    pub static ref DEVICE_SIGNING_KEY: Arc<Mutex<SigningKey>> = {
         match load_signing_key_or_create() {
-            Ok(key) => Arc::new(key),
+            Ok(key) => Arc::new(Mutex::new(key)),
             Err(e) => {
                 panic!("FATAL: Failed to load or create device signing key: {}", e);
             }
         }
     };
+}
+
+pub(crate) fn get_signing_key() -> SigningKey {
+    let (tx, rx) = oneshot::channel::<SigningKey>();
+    get_handle().spawn_blocking(async move || {
+        let cp = DEVICE_SIGNING_KEY.clone();
+        let mtx = cp.lock().await;
+        let _ = tx.send(mtx.clone());
+    });
+
+    let key = rx.blocking_recv().expect("Cannot extract device key");
+    key
 }
 
 pub(crate) fn load_private_key_der() -> io::Result<PrivateKeyDer<'static>> {
@@ -76,7 +95,9 @@ pub(crate) fn load_leaf_private_key_der() -> Result<PrivateKeyDer<'static>, Comm
 }
 
 pub fn load_cert(called_within: bool) -> io::Result<Certificate> {
-    let file = OpenOptions::new().read(true).open(get_default_application_dir(Action).join(CERT_FILE_NAME));
+    let file = OpenOptions::new()
+        .read(true)
+        .open(get_default_application_dir(Action).join(CERT_FILE_NAME));
     match file {
         Ok(_) => {
             let mut reader = BufReader::new(file?);
@@ -160,11 +181,16 @@ pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
 }
 
 pub mod node {
-    use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
+    use crate::consts::{
+        CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME,
+    };
     use crate::utils::get_default_application_dir;
     use crate::utils::DirType::Action;
     use log::info;
-    use rcgen::{CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
+    use rcgen::{
+        CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose, SanType,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -181,9 +207,14 @@ pub mod node {
         Ok((csr_pem, client_keypair))
     }
 
-    pub fn save_node_signed_cert(server_id: String, signed_cert: &str, keypair: KeyPair) -> Result<(PathBuf, PathBuf), CommonThreadError> {
+    pub fn save_node_signed_cert(
+        server_id: String,
+        signed_cert: &str,
+        keypair: KeyPair,
+    ) -> Result<(PathBuf, PathBuf), CommonThreadError> {
         let client_keys_storage = get_default_application_dir(Action)
-            .join(&DEFAULT_CLIENT_CERT_STORAGE).join(&server_id);
+            .join(&DEFAULT_CLIENT_CERT_STORAGE)
+            .join(&server_id);
         fs::create_dir_all(&client_keys_storage)?;
 
         let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
@@ -217,8 +248,7 @@ pub mod node {
     }
 
     pub fn node_params(device: Option<String>) -> CertificateParams {
-        let mut csr_params = CertificateParams::new(vec![])
-            .unwrap();
+        let mut csr_params = CertificateParams::new(vec![]).unwrap();
 
         csr_params.distinguished_name = DistinguishedName::new();
         if let Some(device_id) = device {
@@ -241,7 +271,9 @@ pub mod node {
     }
 
     pub mod load {
-        use crate::consts::{CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME};
+        use crate::consts::{
+            CommonThreadError, CERT_FILE_NAME, DEFAULT_CLIENT_CERT_STORAGE, PRIVATE_KEY_FILE_NAME,
+        };
         use crate::utils::DirType::Action;
         use crate::utils::{get_default_application_dir, get_server_cert_storage};
         use log::info;
@@ -249,12 +281,19 @@ pub mod node {
         use std::fs;
         use std::io::Cursor;
 
-        pub fn load_server_signed_cert_der(server_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
+        pub fn load_server_signed_cert_der(
+            server_id: &str,
+        ) -> Result<CertificateDer<'static>, CommonThreadError> {
             let client_keys_storage = get_default_application_dir(Action)
-                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+                .join(&DEFAULT_CLIENT_CERT_STORAGE)
+                .join(server_id);
 
             if !client_keys_storage.exists() {
-                return Err(format!("Server CA certificate not found at: {}", client_keys_storage.display()).into());
+                return Err(format!(
+                    "Server CA certificate not found at: {}",
+                    client_keys_storage.display()
+                )
+                .into());
             }
 
             let ca_cert_pem = fs::read_to_string(&client_keys_storage.join(CERT_FILE_NAME))
@@ -271,26 +310,32 @@ pub mod node {
 
         pub fn node_cert_exists(server_id: &str) -> bool {
             let client_keys_storage = get_default_application_dir(Action)
-                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+                .join(&DEFAULT_CLIENT_CERT_STORAGE)
+                .join(server_id);
             let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
             let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
 
             let exists = node_cert_path.exists() && node_key_path.exists();
-            info!("Certificate check for {}: cert={}, key={}, both={}", 
-          server_id,
-          node_key_path.exists(),
-          node_cert_path.exists(),
-          exists);
+            info!(
+                "Certificate check for {}: cert={}, key={}, both={}",
+                server_id,
+                node_key_path.exists(),
+                node_cert_path.exists(),
+                exists
+            );
             exists
         }
 
         pub fn load_node_cert_pem(server_id: &str) -> Result<String, CommonThreadError> {
             let client_keys_storage = get_default_application_dir(Action)
-                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+                .join(&DEFAULT_CLIENT_CERT_STORAGE)
+                .join(server_id);
             let node_cert_path = client_keys_storage.join(CERT_FILE_NAME);
 
             if !node_cert_path.exists() {
-                return Err(format!("Client certificate not found: {}", node_cert_path.display()).into());
+                return Err(
+                    format!("Client certificate not found: {}", node_cert_path.display()).into(),
+                );
             }
 
             let cert_pem = fs::read_to_string(&node_cert_path)
@@ -301,11 +346,14 @@ pub mod node {
 
         pub fn load_node_key_pem(server_id: &str) -> Result<String, CommonThreadError> {
             let client_keys_storage = get_default_application_dir(Action)
-                .join(&DEFAULT_CLIENT_CERT_STORAGE).join(server_id);
+                .join(&DEFAULT_CLIENT_CERT_STORAGE)
+                .join(server_id);
             let node_key_path = client_keys_storage.join(PRIVATE_KEY_FILE_NAME);
 
             if !node_key_path.exists() {
-                return Err(format!("Client private key not found: {}", node_key_path.display()).into());
+                return Err(
+                    format!("Client private key not found: {}", node_key_path.display()).into(),
+                );
             }
 
             let key_pem = fs::read_to_string(&node_key_path)
@@ -314,7 +362,9 @@ pub mod node {
             Ok(key_pem)
         }
 
-        pub fn load_node_cert_der(device_id: &str) -> Result<CertificateDer<'static>, CommonThreadError> {
+        pub fn load_node_cert_der(
+            device_id: &str,
+        ) -> Result<CertificateDer<'static>, CommonThreadError> {
             let cert_pem = load_node_cert_pem(device_id)?;
 
             let mut cert_reader = Cursor::new(cert_pem.as_bytes());
@@ -326,7 +376,9 @@ pub mod node {
             Ok(cert_der)
         }
 
-        pub fn load_node_key_der(device_id: &str) -> Result<PrivateKeyDer<'static>, CommonThreadError> {
+        pub fn load_node_key_der(
+            device_id: &str,
+        ) -> Result<PrivateKeyDer<'static>, CommonThreadError> {
             let key_pem = load_node_key_pem(device_id)?;
 
             let mut key_reader = Cursor::new(key_pem.as_bytes());
@@ -340,16 +392,27 @@ pub mod node {
 }
 
 pub mod server {
-    use crate::consts::{of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME};
+    use crate::consts::{
+        of_type, CommonThreadError, CA_CERT_FILE_NAME, CA_KEY_FILE_NAME, CERT_FILE_NAME,
+        LEAF_CERT_NAME, LEAF_KEYS_NAME,
+    };
 
     use crate::keychain::server::load::load_leaf_crt;
-    use crate::keychain::{create_leaf_ca_params, create_root_ca_params, generate_cert_keys, load_cert, load_private_key};
+    use crate::keychain::{
+        create_leaf_ca_params, create_root_ca_params, generate_cert_keys, load_cert,
+        load_private_key,
+    };
     use crate::utils::DirType::Action;
-    use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
+    use crate::utils::{
+        get_client_cert_storage, get_default_application_dir, get_server_cert_storage,
+    };
     use log::info;
     use log::Level::Error;
     use rcgen::IsCa::NoCa;
-    use rcgen::{date_time_ymd, BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
+    use rcgen::{
+        date_time_ymd, BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
+        DnValue, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    };
     use std::fs;
     use std::fs::File;
     use std::io::{ErrorKind, Write};
@@ -359,7 +422,10 @@ pub mod server {
         let (ca_path, kp_path) = {
             let server_storage: PathBuf = get_default_application_dir(Action);
             fs::create_dir_all(&server_storage)?;
-            (server_storage.join(CA_CERT_FILE_NAME), server_storage.join(CA_KEY_FILE_NAME))
+            (
+                server_storage.join(CA_CERT_FILE_NAME),
+                server_storage.join(CA_KEY_FILE_NAME),
+            )
         };
 
         if fs::exists(&ca_path)? && fs::exists(&kp_path)? {
@@ -413,7 +479,10 @@ pub mod server {
         fs::write(&leaf_cert_path, leaf_cert_pem.as_bytes())?;
         fs::write(&leaf_key_path, leaf_key_pem.as_bytes())?;
 
-        info!("Leaf certificate generated and saved at: {}", leaf_cert_path.display());
+        info!(
+            "Leaf certificate generated and saved at: {}",
+            leaf_cert_path.display()
+        );
         info!("Leaf private key saved at: {}", leaf_key_path.display());
 
         Ok((leaf_cert_path, leaf_key_path))
@@ -462,15 +531,21 @@ pub mod server {
         use std::io::{Cursor, ErrorKind};
 
         /**
-        *Load server signed CA from client's storage for verification
-        */
-        pub fn load_server_signed_ca(server_id: &String) -> Result<CertificateDer<'static>, CommonThreadError> {
+         *Load server signed CA from client's storage for verification
+         */
+        pub fn load_server_signed_ca(
+            server_id: &String,
+        ) -> Result<CertificateDer<'static>, CommonThreadError> {
             let ca_cert_path = get_server_cert_storage()
                 .join(&server_id)
                 .join(CERT_FILE_NAME);
 
             if !ca_cert_path.exists() {
-                return Err(format!("Server CA certificate not found: {}", ca_cert_path.display()).into());
+                return Err(format!(
+                    "Server CA certificate not found: {}",
+                    ca_cert_path.display()
+                )
+                .into());
             }
 
             let ca_cert_pem = fs::read_to_string(&ca_cert_path)
@@ -496,32 +571,21 @@ pub mod server {
             }
 
             match fs::read_to_string(&leaf_cert_path) {
-                Ok(res) => {
-                    Ok(res)
-                }
-                Err(e) => {
-                    Err(of_type("Cannot read leaf crt", ErrorKind::Other))
-                }
+                Ok(res) => Ok(res),
+                Err(e) => Err(of_type("Cannot read leaf crt", ErrorKind::Other)),
             }
         }
 
         pub fn load_server_crt_pem() -> Result<String, CommonThreadError> {
             let (cert_path, _) = generate_root_ca()?;
 
-            let crt = fs::read_to_string(&cert_path)
-                .map_err(|e| format!("Failed to read CRT: {}", e))?;
+            let crt =
+                fs::read_to_string(&cert_path).map_err(|e| format!("Failed to read CRT: {}", e))?;
 
             Ok(crt)
         }
     }
 }
-
-pub fn sign(msg: String) -> Result<Signature, CommonThreadError> {
-    let cp = Arc::clone(&DEVICE_SIGNING_KEY);
-    cp.try_sign(msg.as_bytes())
-        .map_err(|e| Box::new(e) as CommonThreadError)
-}
-
 
 fn load_signing_key_or_create() -> Result<SigningKey, CommonThreadError> {
     let mut app_data_dir = get_default_application_dir(Action);
@@ -577,7 +641,8 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let ca_params = create_root_ca_params()?;
     let ca_cert = ca_params.self_signed(&ca_key_pair)?;
 
-    let mut params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
+    let mut params =
+        CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
     let mut cert_name = DistinguishedName::new();
 
     cert_name.push(DnType::OrganizationName, DeviceId.to_string());
@@ -609,16 +674,29 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     Ok(())
 }
 
-
 fn create_root_ca_params() -> Result<CertificateParams, CommonThreadError> {
     let mut ca_params = CertificateParams::new(vec![])?;
     ca_params.distinguished_name = DistinguishedName::new();
-    ca_params.distinguished_name.push(DnType::CommonName, "synco server".to_string());
-    ca_params.distinguished_name.push(DnType::OrganizationName, "synco CA".to_string());
-    ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "synco server".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::OrganizationName, "synco CA".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::OrganizationalUnitName, "synco".to_string());
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyAgreement];
-    ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth, ExtendedKeyUsagePurpose::ServerAuth];
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyAgreement,
+    ];
+    ca_params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ClientAuth,
+        ExtendedKeyUsagePurpose::ServerAuth,
+    ];
     ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
     Ok(ca_params)
@@ -637,11 +715,20 @@ fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
 
     let mut ca_params = CertificateParams::new(san_entries)?;
     ca_params.distinguished_name = DistinguishedName::new();
-    ca_params.distinguished_name.push(DnType::CommonName, "synco server".to_string());
-    ca_params.distinguished_name.push(DnType::OrganizationName, "synco CA".to_string());
-    ca_params.distinguished_name.push(DnType::OrganizationalUnitName, "synco".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "synco server".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::OrganizationName, "synco CA".to_string());
+    ca_params
+        .distinguished_name
+        .push(DnType::OrganizationalUnitName, "synco".to_string());
     ca_params.is_ca = IsCa::NoCa;
-    ca_params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
     ca_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     ca_params.not_after = rcgen::date_time_ymd(2045, 1, 1);
@@ -649,8 +736,9 @@ fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
 }
 
 pub fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
-    let current_key = Arc::clone(&DEVICE_SIGNING_KEY);
-    let pkcs8_pem = current_key.to_pkcs8_pem(LineEnding::LF)?;
+    let current_key = get_signing_key();
+    let pkcs8_pem = current_key.to_pkcs8_pem(LineEnding::LF)
+        .expect("Cannot transform key");
 
     let rcgen_key_pair = KeyPair::from_pem_and_sign_algo(&pkcs8_pem, &PKCS_ED25519)
         .map_err(|e| Box::new(e) as CommonThreadError)?;

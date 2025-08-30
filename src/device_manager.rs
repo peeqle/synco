@@ -89,9 +89,9 @@ pub async fn cleanup() {
     }
 }
 
-pub async fn get_device(device_id: String) -> Option<DiscoveredDevice> {
+pub async fn get_device(device_id: &String) -> Option<DiscoveredDevice> {
     let device_manager = Arc::new(&DefaultDeviceManager);
-    match device_manager.known_devices.read().await.get(&device_id) {
+    match device_manager.known_devices.read().await.get(device_id) {
         None => None,
         Some(dv) => Some(dv.clone()),
     }

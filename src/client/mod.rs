@@ -1,13 +1,15 @@
 mod cert;
 
 use crate::broadcast::DiscoveredDevice;
+use crate::challenge::ChallengeEvent::NewChallengeRequest;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
 use crate::client::cert::{request_ca, request_signed_cert};
 use crate::consts::{
-    CA_CERT_FILE_NAME, CERT_FILE_NAME, CommonThreadError, DEFAULT_SIGNING_SERVER_PORT, of_type,
+    of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT,
 };
 use crate::device_manager::DefaultDeviceManager;
-use crate::diff::{Files, files::get_seeding_files};
+use crate::diff::files::{append, get_file, get_file_writer};
+use crate::diff::{files::get_seeding_files, Files};
 use crate::keychain::node::load::{
     load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der,
     node_cert_exists,
@@ -33,6 +35,7 @@ use std::fs::File;
 use std::hash::Hash;
 use std::io::{BufRead, BufReader, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::DerefMut;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,10 +43,10 @@ use std::{io, mem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
-use crate::diff::files::{append, get_file, get_file_writer};
 
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
@@ -59,7 +62,13 @@ lazy_static! {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientActivity {
-    OpenConnection { device_id: String },
+    OpenConnection {
+        device_id: String,
+    },
+    ChangeStatus {
+        device_id: String,
+        status: ConnectionState,
+    },
 }
 
 pub struct ClientManager {
@@ -87,6 +96,17 @@ impl TcpClient {
             configuration: Arc::new(Self::create_client_config(server_id.clone())?),
             connection: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn update_client_status(&self, status: ConnectionState) {
+        let tcp_peer = self.connection.clone();
+        tokio::spawn(async move {
+            let mut mtx = tcp_peer.lock().await;
+
+            if let Some(conn) = mtx.deref_mut() {
+                conn.connection_status = status;
+            }
+        });
     }
 
     pub fn new_with_verified_certs(server_id: String) -> Result<TcpClient, CommonThreadError> {
@@ -173,13 +193,12 @@ impl TcpClient {
     }
 }
 
-
 pub async fn run(_manager: Arc<ClientManager>) {
     let handle_fn = async |x: ClientActivity| match x {
         ClientActivity::OpenConnection { device_id } => {
             let empty = {
-                let mtx = Arc::clone(&DefaultClientManager);
-                !mtx.connections.lock().await.contains_key(&device_id)
+                let cp = Arc::clone(&DefaultClientManager);
+                !cp.connections.lock().await.contains_key(&device_id)
             };
 
             if empty {
@@ -291,6 +310,15 @@ pub async fn run(_manager: Arc<ClientManager>) {
                 info!("Connection already exists for device: {}", device_id);
             }
         }
+        ClientActivity::ChangeStatus { device_id, status } => {
+            let cp = Arc::clone(&DefaultClientManager);
+            let mut mtx = cp.connections.lock().await;
+
+            if let Some(_device) = mtx.get_mut(&device_id) {
+                _device.update_client_status(status);
+                info!("Opened connection for: {}", device_id);
+            }
+        }
     };
     loop {
         let mut receiver = _manager.bounded_channel.1.lock().await;
@@ -396,6 +424,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 }
 
 fn server_response_listener(peer: &ClientTcpPeer) {
+    let challenge_manager = DefaultChallengeManager.clone();
     let connection_reader = Arc::clone(&peer.connection);
     tokio::spawn(async move {
         let mut buffer = Vec::new();
@@ -405,7 +434,11 @@ fn server_response_listener(peer: &ClientTcpPeer) {
                 if let Ok(req) = serde_json::from_slice::<ServerResponse>(&buffer) {
                     match req {
                         ServerResponse::ChallengeRequest { device_id, nonce } => {
-
+                            challenge_manager
+                                .get_sender()
+                                .send(NewChallengeRequest { device_id, nonce })
+                                .await
+                                .expect("Cannot send");
                         }
                         ServerResponse::SeedingFiles { shared_files } => {
                             for file_data in shared_files {

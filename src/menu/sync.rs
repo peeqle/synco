@@ -1,18 +1,15 @@
 use crate::consts::CommonThreadError;
 use crate::diff::point::{remove_point, update_point};
-use crate::diff::{Files, Points};
+use crate::diff::Points;
 use crate::menu::{read_user_input, Action, Step};
-use crate::menu_step;
+use crate::get_handle;
 use lazy_static::lazy_static;
-use log::error;
 use std::collections::LinkedList;
-use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::SeqCst;
-use std::sync::{mpsc, Arc};
-use std::{fs, io};
-use tokio::runtime::{Handle, Runtime};
+use std::sync::Arc;
+use std::fs;
+use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct SyncAction {
@@ -74,7 +71,6 @@ impl Action for SyncAction {
 struct UpdateSyncPoint {}
 impl Step for UpdateSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        let handle = Handle::current();
         let mut valid_input = false;
 
         while !valid_input {
@@ -97,50 +93,50 @@ impl Step for UpdateSyncPoint {
                         .collect();
                 }
 
-                let (tx, rx) = mpsc::channel::<Result<(), CommonThreadError>>();
+                let (tx, rx) = oneshot::channel::<bool>();
 
-                let handle_clone = handle.clone();
-                handle.spawn_blocking(move || {
-                    let result = handle_clone.block_on(async {
-                        let runtime_handle_update = |ext, path, enabled_input: String| {
-                            update_point(
-                                ext,
-                                Some(path),
-                                match enabled_input.is_empty() {
-                                    true => Some(true),
-                                    false => Some(enabled_input.to_ascii_lowercase() == "y"),
-                                },
-                            )
-                        };
+                get_handle().spawn_blocking(async move || {
+                    let runtime_handle_update = |ext, path, enabled_input: String| {
+                        update_point(
+                            ext,
+                            Some(path),
+                            match enabled_input.is_empty() {
+                                true => Some(true),
+                                false => Some(enabled_input.to_ascii_lowercase() == "y"),
+                            },
+                        )
+                    };
 
-                        if cooked_extensions.is_empty() {
-                            runtime_handle_update(
-                                "ALL".to_string(),
-                                path.clone(),
-                                enabled_input.clone(),
-                            )
-                            .await
-                            .expect("Cannot send update for Point");
-                            let _ = tx.send(Ok(()));
-                        } else {
-                            for ext in cooked_extensions {
-                                runtime_handle_update(ext, path.clone(), enabled_input.clone())
-                                    .await
-                                    .expect("Cannot send update for Point");
+                    if cooked_extensions.is_empty() {
+                        match runtime_handle_update(
+                            "ALL".to_string(),
+                            path.clone(),
+                            enabled_input.clone(),
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                let _ = tx.send(true);
                             }
-                            let _ = tx.send(Ok(()));
+                            Err(_) => {
+                                println!("Cannot send update for Point");
+                                let _ = tx.send(false);
+                            }
                         }
-                        Ok(())
-                    });
-                    let _ = tx.send(result);
+                    } else {
+                        //todo errors here - lazy
+                        for ext in cooked_extensions {
+                            runtime_handle_update(ext, path.clone(), enabled_input.clone())
+                                .await
+                                .expect("Cannot send update for Point");
+                        }
+                        let _ = tx.send(true);
+                    }
                 });
 
-                match rx.recv() {
-                    Ok(Ok(())) => {
-                        valid_input = true;
-                    }
-                    Ok(Err(e)) => {
-                        error!("Cannot perform point update! \n {}", e);
+                match rx.blocking_recv() {
+                    Ok(x) => {
+                        valid_input = x;
                     }
                     Err(_) => {}
                 }

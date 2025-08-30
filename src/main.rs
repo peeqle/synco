@@ -4,11 +4,13 @@ use crate::utils::DirType::Action;
 use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
 use lazy_static::lazy_static;
 use log::{error, info};
+use tokio::runtime::Handle;
 use std::error::Error;
 use std::fs;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
+use once_cell::sync::OnceCell;
 use tokio::io::join;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex};
@@ -37,9 +39,16 @@ lazy_static! {
         (tx, Mutex::new(rx))
     };
 }
+static TOKIO_HANDLE: OnceCell<Handle> = OnceCell::new();
+fn get_handle() -> &'static Handle {
+    TOKIO_HANDLE.get().expect("Tokio runtime handle is not initialized")
+}
 
 #[tokio::main]
 async fn main() -> Result<(), CommonThreadError> {
+    TOKIO_HANDLE.set(Handle::current())
+        .expect("Failed to set tokio handle");
+
     construct();
     display_menu();
 
