@@ -9,7 +9,6 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 use vis::vis;
 
-use crate::consts::DeviceId;
 
 #[derive(Clone)]
 #[vis::vis(pub)]
@@ -29,13 +28,13 @@ pub struct FileEntity {
 }
 
 impl FileEntity {
-    pub fn to_dto(&self) -> FileEntityDto {
+    pub fn to_dto(&self, device_id: &String) -> FileEntityDto {
         FileEntityDto {
             id: self.id.clone(),
             filename: self.filename.clone(),
             size: self.size,
             current_hash: self.current_hash.clone().as_bytes().into(),
-            node_id: DeviceId.clone(),
+            node_id: device_id.clone(),
         }
     }
 }

@@ -1,23 +1,19 @@
 use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR, DEFAULT_SERVER_CERT_STORAGE};
-use crate::keychain::{get_signing_key, DEVICE_SIGNING_KEY};
 use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use base32::Alphabet;
-use der::Writer;
-use ed25519_dalek::ed25519::signature::SignerMut;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
-use std::error::Error;
 use std::fs::File;
-use std::io::{BufReader, ErrorKind, Write};
+use std::io::{BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
+use crate::keychain::data::get_signing_key;
 
 pub mod control {
     use std::error::Error;
@@ -29,9 +25,10 @@ pub mod control {
 
 //todo consider validation via key exchange to prevent mma thru id impersonation
 //local networks are basically safe and directories are restricted via .share bounds
-pub fn device_id() -> Option<String> {
-    let cp = get_signing_key();
-    let public_key_bytes = cp.verifying_key().to_bytes();
+pub async fn device_id() -> Option<String> {
+    let cp = get_signing_key().await;
+    let mtx = cp.lock().await;
+    let public_key_bytes = mtx.verifying_key().to_bytes();
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(&public_key_bytes);

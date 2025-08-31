@@ -1,28 +1,24 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::{ChallengeManager, DefaultChallengeManager, DeviceChallengeStatus};
 use crate::client::{get_client_sender, DefaultClientManager};
-use crate::consts::{CommonThreadError, DeviceId, DEFAULT_LISTENING_PORT};
+use crate::consts::data::get_device_id;
+use crate::consts::{CommonThreadError, DEFAULT_LISTENING_PORT};
 use crate::device_manager::DefaultDeviceManager;
 use crate::keychain::server::generate_root_ca;
 use crate::machine_utils::get_local_ip;
 use crate::menu::{read_user_input, Action, Step};
+use crate::server::data::get_default_server;
 use crate::server::model::ServerRequest;
-use crate::server::DefaultServer;
-use crate::state::InternalState;
 use crate::utils::encrypt_with_passphrase;
 use crate::{broadcast, challenge, client, get_handle, menu_step, server, JoinsChannel};
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::{HashMap, LinkedList};
-use std::future::Pending;
 use std::net::IpAddr;
-use std::num::ParseIntError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::oneshot::{self, channel};
-use tokio::task::spawn_blocking;
 
 type DStep = Box<dyn Step + Send + Sync>;
 lazy_static! {
@@ -90,22 +86,25 @@ impl Step for StartBroadcastStep {
             return Ok(false);
         }
 
-        let net_addr = initialize();
+        get_handle().spawn(async {
+            let net_addr = initialize().await;
 
-        let device_manager_arc = Arc::clone(&DefaultDeviceManager);
-        let challenge_manager = Arc::clone(&DefaultChallengeManager);
+            let device_manager_arc = Arc::clone(&DefaultDeviceManager);
+            let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
-        let handle = tokio::spawn(async move {
-            tokio::spawn(broadcast::start_broadcast_announcer(
-                DEFAULT_LISTENING_PORT,
-                net_addr,
-            ));
-            tokio::spawn(broadcast::start_listener());
-            tokio::spawn(async move { device_manager_arc.start().await });
-            tokio::spawn(async move { challenge::run(challenge_manager.clone()).await });
+            let handle = tokio::spawn(async move {
+                tokio::spawn(broadcast::start_broadcast_announcer(
+                    DEFAULT_LISTENING_PORT,
+                    net_addr,
+                ));
+                tokio::spawn(broadcast::start_listener());
+                tokio::spawn(async move { device_manager_arc.start().await });
+                tokio::spawn(async move { challenge::run(challenge_manager.clone()).await });
+            });
+
+            JoinsChannel.0.clone().send(handle).expect("Cannot send");
         });
 
-        JoinsChannel.0.clone().send(handle)?;
 
         self.invoked.store(true, SeqCst);
 
@@ -136,16 +135,17 @@ impl Step for StartServerStep {
             info!("Server working already ...");
             return Ok(false);
         }
+        get_handle().spawn(async  {
+            let default_server = get_default_server().await;
+            let client_manager = Arc::clone(&DefaultClientManager);
 
-        let default_server = Arc::clone(&DefaultServer);
-        let client_manager = Arc::clone(&DefaultClientManager);
+            let handle = tokio::spawn(async move {
+                tokio::spawn(async move { server::run(default_server.clone()).await });
+                tokio::spawn(async move { client::run(client_manager.clone()).await });
+            });
 
-        let handle = tokio::spawn(async move {
-            tokio::spawn(async move { server::run(default_server.clone()).await });
-            tokio::spawn(async move { client::run(client_manager.clone()).await });
+            JoinsChannel.0.clone().send(handle).expect("Cannot send");
         });
-
-        JoinsChannel.0.clone().send(handle)?;
 
         self.invoked.store(true, SeqCst);
 
@@ -297,7 +297,7 @@ struct CompleteChallenge {}
 impl Step for CompleteChallenge {
     fn action(&self) -> Result<bool, CommonThreadError> {
         ListChallenges {}.action()?;
-        let (tx, rx) = oneshot::channel::<HashMap<String, DeviceChallengeStatus>>();
+        let (tx, mut rx) = oneshot::channel::<HashMap<String, DeviceChallengeStatus>>();
         get_handle().spawn_blocking(async move || {
             let challenges = {
                 let challenge_manager = Arc::clone(&DefaultChallengeManager);
@@ -308,7 +308,7 @@ impl Step for CompleteChallenge {
         });
 
         let mut challenges = HashMap::<String, DeviceChallengeStatus>::new();
-        if let Ok(ch) = rx.blocking_recv() {
+        if let Ok(ch) = rx.try_recv() {
             challenges = ch.clone();
         };
 
@@ -378,12 +378,10 @@ impl Step for CompleteChallenge {
     }
 }
 
-fn initialize() -> IpAddr {
-    let internal_state = InternalState::new().with_passphrase("bonkers".to_string());
-
+async fn initialize() -> IpAddr {
     let local_ip = get_local_ip().expect("Could not determine local IP address");
 
-    info!("Device ID: {}", &DeviceId[..]);
+    info!("Device ID: {}", &get_device_id().await[..]);
     info!("Listening Port: {}", DEFAULT_LISTENING_PORT);
     info!("Local IP: {}", local_ip);
 

@@ -5,13 +5,9 @@ use crate::utils::{get_client_cert_storage, get_default_application_dir, get_ser
 use lazy_static::lazy_static;
 use log::{error, info};
 use tokio::runtime::Handle;
-use std::error::Error;
 use std::fs;
-use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::Arc;
 use once_cell::sync::OnceCell;
-use tokio::io::join;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -26,7 +22,6 @@ mod keychain;
 mod machine_utils;
 mod menu;
 mod server;
-mod state;
 mod tcp_utils;
 mod utils;
 

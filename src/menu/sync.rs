@@ -93,7 +93,7 @@ impl Step for UpdateSyncPoint {
                         .collect();
                 }
 
-                let (tx, rx) = oneshot::channel::<bool>();
+                let (tx, mut rx) = oneshot::channel::<bool>();
 
                 get_handle().spawn_blocking(async move || {
                     let runtime_handle_update = |ext, path, enabled_input: String| {
@@ -134,7 +134,7 @@ impl Step for UpdateSyncPoint {
                     }
                 });
 
-                match rx.blocking_recv() {
+                match rx.try_recv() {
                     Ok(x) => {
                         valid_input = x;
                     }

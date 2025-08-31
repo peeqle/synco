@@ -1,7 +1,8 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::DeviceChallengeStatus::Active;
 use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
-use crate::consts::{of_type, DeviceId, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
+use crate::consts::data::get_device_id;
+use crate::consts::{of_type, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
 use crate::diff::files::{get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
@@ -31,18 +32,32 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task;
+use crate::server::data::get_default_server;
 
-pub(crate) mod model;
+pub mod model;
 mod util;
 
-lazy_static! {
-    pub static ref DefaultServer: Arc<TcpServer> = {
+
+pub mod data {
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex, OnceCell};
+    use crate::server::model::{ServerActivity, TcpServer};
+
+    static DefaultServer: OnceCell<Arc<TcpServer>> = OnceCell::const_new();
+    pub async fn init_server() -> Arc<TcpServer> {
         let channel = mpsc::channel::<ServerActivity>(500);
         let tcp_server = TcpServer::new((channel.0, Mutex::new(channel.1)))
+            .await
             .expect("Cannot create new TcpServer instance");
         Arc::new(tcp_server)
-    };
+    } 
+    
+    pub async fn get_default_server() -> Arc<TcpServer> {
+        let cp = DefaultServer.get_or_init(|| async { init_server().await }).await;
+        cp.clone()
+    }
 }
+
 
 pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
     info!("Starting server...");
@@ -236,7 +251,7 @@ async fn open_device_connection(
                             .expect("Cannot send");
                     }
                     Unknown => {
-                        let server_manager = Arc::clone(&DefaultServer);
+                        let server_manager = get_default_server().await;
                         server_manager
                             .bounded_channel
                             .0
@@ -321,8 +336,6 @@ async fn handle_ca_request(
         .await
         .map_err(|e| of_type("Failed to read client request", ErrorKind::Other))?;
 
-    let current_device_id = DeviceId.clone();
-
     match serde_json::from_slice::<SigningServerRequest>(&buffer[..bytes_read]) {
         Ok(request) => {
             match request {
@@ -368,7 +381,7 @@ async fn handle_ca_request(
                     Ok(signed_crt) => {
                         stream
                             .write_all(&serde_json::to_vec(&ServerResponse::SignedCertificate {
-                                device_id: current_device_id,
+                                device_id: get_device_id().await,
                                 cert_pem: String::from_utf8_lossy(signed_crt.as_slice())
                                     .to_string(),
                             })?)

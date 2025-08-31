@@ -24,20 +24,19 @@ use tokio_rustls::TlsAcceptor;
 use vis::vis;
 
 impl TcpServer {
-    pub fn new(
+    pub async fn new(
         server_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
     ) -> Result<TcpServer, Box<dyn Error + Send + Sync>> {
         let validation = validate_server_cert_present();
         if !validation {
-            let res = generate_cert_keys();
-            if res.is_err() {
+            if generate_cert_keys().await.is_err() {
                 return Err(Box::new(io::Error::new(
                     ErrorKind::InvalidData,
                     "Server certificates are invalid, try to run [regenerate]",
                 )));
             }
         }
-        let configuration = Self::create_server_config()?;
+        let configuration = Self::create_server_config().await?;
         Ok(TcpServer {
             local_ip: get_local_ip().unwrap(),
             current_acceptor: Arc::new(TlsAcceptor::from(Arc::new(configuration))),
@@ -46,8 +45,8 @@ impl TcpServer {
         })
     }
 
-    pub fn create_server_config() -> Result<ServerConfig, CommonThreadError> {
-        let server_certs = load_leaf_cert_der()?;
+    pub async fn create_server_config() -> Result<ServerConfig, CommonThreadError> {
+        let server_certs = load_leaf_cert_der().await?;
         let server_key = load_leaf_private_key_der()?;
 
         // FIX: Use root CA instead of leaf certificate for client verification

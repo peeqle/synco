@@ -1,14 +1,25 @@
-use crate::utils::device_id;
 use der::asn1::ObjectIdentifier;
-use lazy_static::lazy_static;
 use std::error::Error;
 use std::io;
 use std::io::ErrorKind;
 
-lazy_static! {
-    pub static ref DeviceId: String = device_id()
-        .expect("Cannot create device id, try again")
-        .to_string();
+pub mod data {
+    use crate::utils::device_id;
+    use tokio::sync::OnceCell;
+
+    static DeviceId: OnceCell<String> = OnceCell::const_new();
+
+    pub async fn get_device_id() -> String {
+        let key = DeviceId
+            .get_or_init(|| async {
+                device_id()
+                    .await
+                    .expect("Cannot create device id, try again")
+                    .to_string()
+            })
+            .await;
+        key.clone()
+    }
 }
 
 pub type CommonThreadError = Box<dyn Error + Send + Sync>;

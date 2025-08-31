@@ -1,7 +1,7 @@
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
-use crate::consts::{CommonThreadError, DeviceId, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
-use crate::device_manager::{add_new_device, DefaultDeviceManager};
+use crate::consts::{CommonThreadError, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
+use crate::device_manager::{add_new_device, get_device, DefaultDeviceManager};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Instant};
+use crate::consts::data::get_device_id;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveryMessage {
@@ -93,7 +94,7 @@ pub async fn start_listener() -> Result<(), CommonThreadError> {
     loop {
         let (len, peer_addr) = socket.recv_from(&mut buf).await?;
         let message_str = String::from_utf8_lossy(&buf[..len]);
-        let current_device_id = DeviceId.clone();
+        let current_device_id = get_device_id().await.clone();
         match serde_json::from_str::<DiscoveryMessage>(&message_str) {
             Ok(msg) => {
                 let remote_addr = msg
@@ -147,7 +148,7 @@ pub async fn start_broadcast_announcer(
     socket.set_broadcast(true)?;
 
     let message = DiscoveryMessage::new(
-        DeviceId.to_string(),
+        get_device_id().await.to_string(),
         listening_port,
         Some(local_ip),
         DEFAULT_SERVER_PORT,

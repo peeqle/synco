@@ -30,7 +30,7 @@ lazy_static! {
 }
 
 pub mod files {
-    use crate::consts::{of_type, CommonThreadError, DeviceId};
+    use crate::consts::{of_type, CommonThreadError};
     use crate::diff::consts::MAX_FILE_SIZE_BYTES;
     use crate::diff::files::SnapshotAction::Update;
     use crate::diff::model::{from_dto, FileEntity, FileEntityDto};
@@ -50,12 +50,14 @@ pub mod files {
     use tokio::io::BufWriter;
     use tokio::sync::Notify;
     use uuid::Uuid;
+    use crate::consts::data::get_device_id;
 
     pub async fn get_seeding_files() -> Vec<FileEntityDto> {
         let files = Files.clone();
         let mtx = files.lock().await;
 
-        mtx.iter().map(|(_, y)| y.to_dto()).collect()
+        let device_id = get_device_id().await;
+        mtx.values().map(|y| y.to_dto(&device_id)).collect()
     }
 
     pub async fn get_file(file_id: &String) -> Option<FileEntity> {
@@ -154,7 +156,7 @@ pub mod files {
                         snapshot_path: None,
                         prev_hash: None,
                         current_hash: blake_filepath_hash,
-                        main_node: DeviceId.clone(),
+                        main_node: get_device_id().await,
                         synced_with: vec![],
                         notify: Arc::new(Notify::new()),
                     },

@@ -1,5 +1,4 @@
 use crate::broadcast::DiscoveredDevice;
-use crate::consts::DeviceId;
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::HashMap;

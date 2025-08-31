@@ -1,8 +1,8 @@
 use crate::consts::{
-    CommonThreadError, DeviceId, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME,
+    CommonThreadError, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME,
     PRIVATE_KEY_FILE_NAME, SIGNING_KEY,
 };
-use crate::get_handle;
+use crate::keychain::data::get_signing_key;
 use crate::keychain::server::generate_root_ca;
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage, LockExt};
@@ -10,7 +10,6 @@ use der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
 use error::Error;
-use lazy_static::lazy_static;
 use rand::rngs::OsRng;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue,
@@ -20,44 +19,43 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Cursor, ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::{error, fs, io};
-use tokio::sync::{oneshot, Mutex};
+use crate::consts::data::get_device_id;
 
-lazy_static! {
-    pub static ref DEVICE_SIGNING_KEY: Arc<Mutex<SigningKey>> = {
-        match load_signing_key_or_create() {
+pub mod data {
+    use crate::keychain::load_signing_key_or_create;
+    use ed25519_dalek::SigningKey;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, OnceCell};
+
+    static DEVICE_SIGNING_KEY: OnceCell<Arc<Mutex<SigningKey>>> = OnceCell::const_new();
+    async fn init_signing_key() -> Arc<Mutex<SigningKey>> {
+        match load_signing_key_or_create().await {
             Ok(key) => Arc::new(Mutex::new(key)),
             Err(e) => {
                 panic!("FATAL: Failed to load or create device signing key: {}", e);
             }
         }
-    };
+    }
+    pub async fn get_signing_key() -> Arc<Mutex<SigningKey>> {
+        let key = DEVICE_SIGNING_KEY
+            .get_or_init(|| async { init_signing_key().await })
+            .await;
+        key.clone()
+    }
 }
 
-pub(crate) fn get_signing_key() -> SigningKey {
-    let (tx, rx) = oneshot::channel::<SigningKey>();
-    get_handle().spawn_blocking(async move || {
-        let cp = DEVICE_SIGNING_KEY.clone();
-        let mtx = cp.lock().await;
-        let _ = tx.send(mtx.clone());
-    });
-
-    let key = rx.blocking_recv().expect("Cannot extract device key");
-    key
-}
-
-pub(crate) fn load_private_key_der() -> io::Result<PrivateKeyDer<'static>> {
-    let private_key = load_private_key(false)?;
+pub async fn load_private_key_der() -> Result<PrivateKeyDer<'static>, CommonThreadError> {
+    let private_key = load_private_key(false).await?;
     Ok(PrivateKeyDer::try_from(private_key.serialize_der()).expect("Cannot cast"))
 }
 
-pub(crate) fn load_cert_der() -> io::Result<CertificateDer<'static>> {
-    let certs: Certificate = load_cert(false)?;
+pub async fn load_cert_der() -> Result<CertificateDer<'static>, CommonThreadError> {
+    let certs: Certificate = load_cert(false).await?;
     Ok(CertificateDer::from(certs.der().to_vec()))
 }
 
-pub(crate) fn load_leaf_cert_der() -> Result<CertificateDer<'static>, CommonThreadError> {
+pub async fn load_leaf_cert_der() -> Result<CertificateDer<'static>, CommonThreadError> {
     let leaf_cert_path = get_server_cert_storage().join(LEAF_CERT_NAME);
 
     if !leaf_cert_path.exists() {
@@ -94,42 +92,43 @@ pub(crate) fn load_leaf_private_key_der() -> Result<PrivateKeyDer<'static>, Comm
     Ok(leaf_key_der)
 }
 
-pub fn load_cert(called_within: bool) -> io::Result<Certificate> {
-    let file = OpenOptions::new()
+pub async fn load_cert(called_within: bool) -> Result<Certificate, CommonThreadError> {
+    let file_result = OpenOptions::new()
         .read(true)
         .open(get_default_application_dir(Action).join(CERT_FILE_NAME));
-    match file {
-        Ok(_) => {
-            let mut reader = BufReader::new(file?);
-            let mut holder: String = String::new();
+
+    match file_result {
+        Ok(file) => {
+            let mut reader = BufReader::new(file);
+            let mut holder = String::new();
             reader.read_to_string(&mut holder)?;
 
-            let cert_iter = CertificateParams::from_ca_cert_pem(&holder).unwrap();
-            let loaded_kp = load_private_key(false)?;
+            let params = CertificateParams::from_ca_cert_pem(&holder)?;
+            let loaded_kp = load_private_key(false).await?;
 
-            Ok(cert_iter.self_signed(&loaded_kp).unwrap())
+            Ok(params.self_signed(&loaded_kp)?)
         }
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {
                 if called_within {
-                    return Err(err);
+                    return Err(err.into());
                 }
                 println!("Creating certificates...");
-                generate_cert_keys().unwrap();
-                load_cert(true)
+                generate_cert_keys().await?;
+                Box::pin(load_cert(true)).await
             }
             ErrorKind::PermissionDenied => {
                 eprintln!(
                     "[KEYS] Cannot generate keys for the server startup, generate them at: /keys..."
                 );
-                Err(err)
+                Err(err.into())
             }
-            _ => Err(err),
+            _ => Err(err.into()),
         },
     }
 }
 
-pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
+pub async fn load_private_key(called_within: bool) -> Result<KeyPair, CommonThreadError> {
     let app_data_dir = get_default_application_dir(Action);
     let key_path = app_data_dir.join(PRIVATE_KEY_FILE_NAME);
 
@@ -163,19 +162,19 @@ pub fn load_private_key(called_within: bool) -> io::Result<KeyPair> {
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {
                 if called_within {
-                    return Err(err);
+                    return Err(err.into_inner().unwrap());
                 }
                 println!("Creating certificates...");
-                generate_cert_keys().unwrap();
-                load_private_key(true)
+                generate_cert_keys().await.unwrap();
+                Box::pin(load_private_key(true)).await
             }
             ErrorKind::PermissionDenied => {
                 eprintln!(
                     "[KEYS] Cannot generate keys for the server startup, generate them at: /keys..."
                 );
-                Err(err)
+                Err(err.into_inner().unwrap())
             }
-            _ => Err(err),
+            _ => Err(err.into_inner().unwrap()),
         },
     }
 }
@@ -587,7 +586,7 @@ pub mod server {
     }
 }
 
-fn load_signing_key_or_create() -> Result<SigningKey, CommonThreadError> {
+async fn load_signing_key_or_create() -> Result<SigningKey, CommonThreadError> {
     let mut app_data_dir = get_default_application_dir(Action);
 
     let key_file_path = app_data_dir.join(SIGNING_KEY);
@@ -606,7 +605,7 @@ fn load_signing_key_or_create() -> Result<SigningKey, CommonThreadError> {
             if e.kind() == ErrorKind::NotFound {
                 println!("Signing key file not found. Generating new keychain...");
                 generate_new_keychain()?;
-                load_signing_key_or_create()
+                Box::pin(load_signing_key_or_create()).await
             } else {
                 Err(Box::new(e) as CommonThreadError)
             }
@@ -632,7 +631,7 @@ fn generate_new_keychain() -> Result<(), Box<dyn Error + Sync + Send>> {
     Ok(())
 }
 
-pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
+pub async fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let (ca_cert_path, ca_key_path) = generate_root_ca()?;
 
     let ca_key_pem = fs::read_to_string(&ca_key_path)?;
@@ -645,7 +644,7 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
         CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
     let mut cert_name = DistinguishedName::new();
 
-    cert_name.push(DnType::OrganizationName, DeviceId.to_string());
+    cert_name.push(DnType::OrganizationName, get_device_id().await.to_string());
     cert_name.push(
         DnType::CommonName,
         DnValue::PrintableString("synco".try_into().unwrap()),
@@ -658,7 +657,7 @@ pub fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     ];
     params.is_ca = IsCa::NoCa;
 
-    let keypair = generate_keypair()?;
+    let keypair = generate_keypair().await?;
 
     let cert = params.signed_by(&keypair, &ca_cert, &ca_key_pair)?;
     let private_key_pem = keypair.serialize_pem();
@@ -735,10 +734,14 @@ fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
     Ok(ca_params)
 }
 
-pub fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
-    let current_key = get_signing_key();
-    let pkcs8_pem = current_key.to_pkcs8_pem(LineEnding::LF)
-        .expect("Cannot transform key");
+pub async fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>> {
+    let pkcs8_pem = get_signing_key()
+        .await
+        .with_lock(|e| {
+            e.to_pkcs8_pem(LineEnding::LF)
+                .expect("Cannot transform key")
+        })
+        .await;
 
     let rcgen_key_pair = KeyPair::from_pem_and_sign_algo(&pkcs8_pem, &PKCS_ED25519)
         .map_err(|e| Box::new(e) as CommonThreadError)?;
