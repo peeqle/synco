@@ -5,11 +5,36 @@ use log::{error, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use crate::broadcast::DiscoveredDevice;
+use crate::client::open_connection;
 use crate::consts::{of_type, CommonThreadError, DEFAULT_SIGNING_SERVER_PORT};
 use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
 use crate::keychain::server::save_server_cert;
 use crate::server::model::{ServerResponse, SigningServerRequest};
+use crate::utils::{get_default_application_dir, get_server_cert_storage};
+use crate::utils::DirType::Action;
 
+pub async fn create_certs_clean(device_id: &String, device: &DiscoveredDevice) {
+    let _ = std::fs::remove_dir_all(get_server_cert_storage().join(device_id));
+    let _ = std::fs::remove_dir_all(
+        get_default_application_dir(Action)
+            .join("client")
+            .join(device_id),
+    );
+
+    info!("Retrying certificate setup for device: {}", device_id);
+
+    if let Err(retry_error) = async {
+        request_ca(device).await?;
+        request_signed_cert(device).await?;
+        open_connection(device_id.clone()).await
+    }
+        .await
+    {
+        error!("Retry failed for device {}: {}", device_id, retry_error);
+    } else {
+        info!("Retry successful for device: {}", device_id);
+    }
+}
 pub async fn request_ca(_device: &DiscoveredDevice) -> Result<Option<ServerResponse>, CommonThreadError> {
     info!("Requesting CA certificate from device: {}", _device.device_id);
 
@@ -52,19 +77,19 @@ pub async fn request_signed_cert(_device: &DiscoveredDevice) -> Result<(), Commo
     if let Some(response) = call_signing_server(SigningServerRequest::SignCsr {
         csr: csr_pem
     }, _device).await.expect("Cannot execute call to signing server") {
-        match response {
+        return match response {
             ServerResponse::SignedCertificate { device_id, cert_pem } => {
                 info!("Got CRT: {}", &cert_pem);
                 save_node_signed_cert(device_id, cert_pem.as_str(), node_keypair)?;
-                return Ok(());
+                Ok(())
             }
             ServerResponse::Error { message } => {
                 error!("Server error during certificate signing: {}", message);
-                return Err(of_type(&format!("Certificate signing failed: {}", message), ErrorKind::Other));
+                Err(of_type(&format!("Certificate signing failed: {}", message), ErrorKind::Other))
             }
             _ => {
                 error!("Unexpected response type for certificate signing request");
-                return Err(of_type("Certificate signing failed: Unexpected response type", ErrorKind::Other));
+                Err(of_type("Certificate signing failed: Unexpected response type", ErrorKind::Other))
             }
         }
     }

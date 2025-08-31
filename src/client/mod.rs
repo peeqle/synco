@@ -1,41 +1,26 @@
 mod cert;
 
-use crate::broadcast::DiscoveredDevice;
 use crate::challenge::ChallengeEvent::NewChallengeRequest;
-use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
-use crate::client::cert::{request_ca, request_signed_cert};
-use crate::consts::{
-    of_type, CommonThreadError, CA_CERT_FILE_NAME, CERT_FILE_NAME, DEFAULT_SIGNING_SERVER_PORT,
-};
+use crate::challenge::DefaultChallengeManager;
+use crate::client::cert::{create_certs_clean, request_ca, request_signed_cert};
+use crate::consts::{CommonThreadError, CERT_FILE_NAME};
 use crate::device_manager::DefaultDeviceManager;
 use crate::diff::files::{append, get_file, get_file_writer};
-use crate::diff::{files::get_seeding_files, Files};
-use crate::get_handle;
-use crate::keychain::node::load::{
-    load_node_cert_der, load_node_cert_pem, load_node_key_der, load_server_signed_cert_der,
-    node_cert_exists,
-};
-use crate::keychain::node::{generate_node_csr, save_node_signed_cert};
+use crate::keychain::node::load::{load_node_cert_der, load_node_key_der, node_cert_exists};
 use crate::keychain::server::load::load_server_signed_ca;
-use crate::keychain::server::save_server_cert;
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::{ConnectionState, ServerRequest, ServerResponse};
-use crate::tcp_utils::{receive_file_chunked, send_framed};
+use crate::tcp_utils::{receive_file_chunked, receive_frame, send_framed};
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use lazy_static::lazy_static;
-use log::{error, info};
+use log::{debug, error, info};
 use rustls::client::WebPkiServerVerifier;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, ServerName};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt::format;
-use std::fs::File;
-use std::hash::Hash;
-use std::io::{BufRead, BufReader, ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::ErrorKind;
 use std::ops::DerefMut;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -45,8 +30,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe::Sender;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tokio::task::spawn_blocking;
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
+use tokio::task::{spawn_blocking, JoinHandle};
 use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
 
@@ -90,7 +75,7 @@ pub async fn get_client_sender(device_id: String) -> Option<mpsc::Sender<ServerR
         let mtx = cp.lock().await;
 
         if let Some(conn) = mtx.as_ref() {
-            return Some(conn.sender.clone());
+            return Some(conn.request_sender.clone());
         }
     }
     None
@@ -102,11 +87,12 @@ pub struct TcpClient {
     configuration: Arc<ClientConfig>,
     pub connection: Arc<Mutex<Option<ClientTcpPeer>>>,
 }
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ClientTcpPeer {
     pub connection: Arc<Mutex<tokio_rustls::client::TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
-    pub sender: mpsc::Sender<ServerRequest>,
+    pub request_sender: mpsc::Sender<ServerRequest>,
+    pub shutdown_channel: watch::Sender<bool>,
 }
 
 impl TcpClient {
@@ -213,6 +199,21 @@ impl TcpClient {
     }
 }
 
+//tries to connect to every known device
+pub async fn try_connect() {
+    let known_cp = DefaultDeviceManager.clone();
+
+    for (id, device) in known_cp.known_devices.read().await.iter() {
+        info!(
+            "Reconnecting to {}: {}",
+            id,
+            device.connect_addr.ip().clone()
+        );
+
+        create_client(id.clone()).await;
+    }
+}
+
 pub async fn run(_manager: Arc<ClientManager>) {
     let handle_fn = async |x: ClientActivity| match x {
         ClientActivity::OpenConnection { device_id } => {
@@ -222,110 +223,7 @@ pub async fn run(_manager: Arc<ClientManager>) {
             };
 
             if empty {
-                let device_manager = Arc::clone(&DefaultDeviceManager);
-                if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
-                    info!("Starting certificate setup for device: {}", device_id);
-
-                    let ca_cert_path = get_server_cert_storage()
-                        .join(&device_id)
-                        .join(CERT_FILE_NAME);
-                    let need_ca = !ca_cert_path.exists();
-                    let need_client_cert = !node_cert_exists(&device_id);
-
-                    if need_ca {
-                        info!("CA certificate missing for {}, fetching...", device_id);
-                        match request_ca(&device).await {
-                            Ok(_) => {
-                                info!(
-                                    "CA certificate fetched successfully for device: {}",
-                                    device_id
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to fetch CA certificate for device {}: {}",
-                                    device_id, e
-                                );
-                                return;
-                            }
-                        }
-                    } else {
-                        info!("CA certificate already exists for device: {}", device_id);
-                    }
-
-                    if need_client_cert {
-                        info!(
-                            "Client certificate missing for {}, requesting signature...",
-                            device_id
-                        );
-                        match request_signed_cert(device).await {
-                            Ok(_) => {
-                                info!(
-                                    "Client certificate signed successfully for device: {}",
-                                    device_id
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to get signed certificate for device {}: {}",
-                                    device_id, e
-                                );
-                                return;
-                            }
-                        }
-                    } else {
-                        info!(
-                            "Client certificate already exists for device: {}",
-                            device_id
-                        );
-                    }
-
-                    match open_connection(device_id.clone()).await {
-                        Ok(_) => {
-                            info!("Connection opened successfully for device: {}", device_id);
-                        }
-                        Err(e) => {
-                            error!("Failed to open connection for device {}: {}", device_id, e);
-
-                            if e.to_string().contains("UnknownIssuer")
-                                || e.to_string().contains("invalid peer certificate")
-                            {
-                                error!(
-                                    "Certificate validation failed, cleaning up certificates for {}",
-                                    device_id
-                                );
-
-                                let _ = std::fs::remove_dir_all(
-                                    get_server_cert_storage().join(&device_id),
-                                );
-                                let _ = std::fs::remove_dir_all(
-                                    get_default_application_dir(Action)
-                                        .join("client")
-                                        .join(&device_id),
-                                );
-
-                                info!("Retrying certificate setup for device: {}", device_id);
-
-                                if let Err(retry_error) = async {
-                                    request_ca(&device).await?;
-                                    request_signed_cert(&device).await?;
-                                    open_connection(device_id.clone()).await
-                                }
-                                .await
-                                {
-                                    error!(
-                                        "Retry failed for device {}: {}",
-                                        device_id, retry_error
-                                    );
-                                } else {
-                                    info!("Retry successful for device: {}", device_id);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    error!("Device {} not found in known devices registry", device_id);
-                }
+                create_client(device_id).await;
             } else {
                 info!("Connection already exists for device: {}", device_id);
             }
@@ -346,6 +244,107 @@ pub async fn run(_manager: Arc<ClientManager>) {
                  Some(message) = receiver.recv() => handle_fn(message).await
         }
     }
+}
+pub async fn create_client(device_id: String) {
+    let device_manager = Arc::clone(&DefaultDeviceManager);
+    if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {
+        info!("Starting certificate setup for device: {}", device_id);
+
+        let ca_cert_path = get_server_cert_storage()
+            .join(&device_id)
+            .join(CERT_FILE_NAME);
+        let need_ca = !ca_cert_path.exists();
+        let need_client_cert = !node_cert_exists(&device_id);
+
+        if need_ca {
+            info!("CA certificate missing for {}, fetching...", device_id);
+            match request_ca(device).await {
+                Ok(_) => {
+                    info!(
+                        "CA certificate fetched successfully for device: {}",
+                        device_id
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to fetch CA certificate for device {}: {}",
+                        device_id, e
+                    );
+                    return;
+                }
+            }
+        } else {
+            info!("CA certificate already exists for device: {}", device_id);
+        }
+
+        if need_client_cert {
+            info!(
+                "Client certificate missing for {}, requesting signature...",
+                device_id
+            );
+            match request_signed_cert(device).await {
+                Ok(_) => {
+                    info!(
+                        "Client certificate signed successfully for device: {}",
+                        device_id
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to get signed certificate for device {}: {}",
+                        device_id, e
+                    );
+                    return;
+                }
+            }
+        } else {
+            info!(
+                "Client certificate already exists for device: {}",
+                device_id
+            );
+        }
+        //close active connections and replace with new ones
+        close_connection(&device_id).await;
+        match open_connection(device_id.clone()).await {
+            Ok(_) => {
+                info!("Connection opened successfully for device: {}", device_id);
+            }
+            Err(e) => {
+                error!("Failed to open connection for device {}: {}", device_id, e);
+
+                if e.to_string().contains("UnknownIssuer")
+                    || e.to_string().contains("invalid peer certificate")
+                {
+                    error!(
+                        "Certificate validation failed, cleaning up certificates for {}",
+                        device_id
+                    );
+
+                    create_certs_clean(&device_id, device).await;
+                }
+            }
+        }
+    } else {
+        error!("Device {} not found in known devices registry", device_id);
+    }
+}
+
+async fn close_connection(device_id: &String) {
+    let manager = Arc::clone(&DefaultClientManager);
+    let mut clients = manager.connections.write().await;
+    if let Some(client) = clients.get(device_id) {
+        let mut mtx = client.connection.lock().await;
+        if let Some(peer) = mtx.as_mut() {
+            let result = peer.shutdown_channel.send(true);
+            if result.is_err() {
+                debug!("Receiver closed: {}", device_id);
+            }
+        } else {
+            debug!("No active receiver: {}", device_id);
+        }
+    }
+
+    clients.remove(device_id);
 }
 
 async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
@@ -414,14 +413,16 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     );
 
     let (client_sender, client_receiver) = mpsc::channel(200);
+    let (sh_tx, sh_rx) = watch::channel(false);
 
     let new_peer = ClientTcpPeer {
         connection: Arc::new(Mutex::new(tls_stream)),
         connection_status: Unknown,
-        sender: client_sender,
+        request_sender: client_sender,
+        shutdown_channel: sh_tx,
     };
 
-    server_response_listener(&new_peer);
+    server_response_listener(&new_peer, sh_rx.clone());
 
     //Tcp client connection set up
     {
@@ -437,61 +438,66 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     }
 
     //request receiver initialization
-    client_request_listener(&device.device_id, client_receiver).await;
+    client_request_listener(&device.device_id, client_receiver, sh_rx).await;
 
     info!("Connection setup completed for: {}", server_id);
     Ok(())
 }
 
-fn server_response_listener(peer: &ClientTcpPeer) {
+fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<bool>) {
     let challenge_manager = DefaultChallengeManager.clone();
     let connection_reader = Arc::clone(&peer.connection);
     tokio::spawn(async move {
-        let mut buffer = Vec::new();
         loop {
-            let mut locked_connection = connection_reader.lock().await;
-            if let Ok(_) = locked_connection.read(&mut buffer).await {
-                if let Ok(req) = serde_json::from_slice::<ServerResponse>(&buffer) {
-                    match req {
-                        ServerResponse::ChallengeRequest { device_id, nonce } => {
-                            challenge_manager
-                                .get_sender()
-                                .send(NewChallengeRequest { device_id, nonce })
-                                .await
-                                .expect("Cannot send");
-                        }
-                        ServerResponse::SeedingFiles { shared_files } => {
-                            for file_data in shared_files {
-                                append(file_data).await;
-                            }
-                        }
-                        ServerResponse::FileMetadata { file_id, size } => {
-                            if let Some(existing_file) = get_file(&file_id).await {
-                                if let Ok(file_writer) = get_file_writer(&existing_file).await {
-                                    receive_file_chunked(
-                                        Arc::clone(&connection_reader),
-                                        size,
-                                        file_writer,
-                                    )
+            tokio::select! {
+                req = receive_frame::<_, ServerResponse>(connection_reader.clone()) => {
+                    if let Ok(request) = req {
+                        match request {
+                            ServerResponse::ChallengeRequest { device_id, nonce } => {
+                                challenge_manager
+                                    .get_sender()
+                                    .send(NewChallengeRequest { device_id, nonce })
                                     .await
-                                    .expect(&format!("Cannot receive file {}", file_id));
+                                    .expect("Cannot send");
+                            }
+                            ServerResponse::SeedingFiles { shared_files } => {
+                                for file_data in shared_files {
+                                    append(file_data).await;
                                 }
                             }
+                            ServerResponse::FileMetadata { file_id, size } => {
+                                if let Some(existing_file) = get_file(&file_id).await {
+                                    if let Ok(file_writer) = get_file_writer(&existing_file).await {
+                                        receive_file_chunked(
+                                            Arc::clone(&connection_reader),
+                                            size,
+                                            file_writer,
+                                        )
+                                        .await
+                                        .expect(&format!("Cannot receive file {}", file_id));
+                                    }
+                                }
+                            }
+                            ServerResponse::Error { .. } => {}
+                            _ => {}
                         }
-                        ServerResponse::Error { .. } => {}
-                        _ => {}
                     }
-                }
 
-                AsyncWriteExt::flush(&mut buffer)
-                    .await
-                    .expect("Cannot flush");
+                }
+                _ = sh_rx.changed() => {
+                    debug!("Closing server connection...");
+                    break;
+                }
             }
         }
     });
 }
 
-async fn client_request_listener(server_id: &String, mut client_receiver: Receiver<ServerRequest>) {
+async fn client_request_listener(
+    server_id: &String,
+    mut client_receiver: Receiver<ServerRequest>,
+    mut sh_rx: watch::Receiver<bool>,
+) {
     let manager = Arc::clone(&DefaultClientManager);
     let connections = manager.connections.read().await;
 
@@ -504,11 +510,26 @@ async fn client_request_listener(server_id: &String, mut client_receiver: Receiv
 
             tokio::spawn(async move {
                 loop {
-                    if let Some(message) = client_receiver.recv().await {
-                        let serialized = serde_json::to_vec(&message).expect("Cannot serialize");
-                        send_framed(connection_arc.clone(), serialized)
-                            .await
-                            .expect(&format!("Cannot send request to the server: {:?}", message));
+                    tokio::select! {
+                         message = client_receiver.recv() => {
+                            match message {
+                                Some(message) => {
+                                    let serialized = serde_json::to_vec(&message)
+                                        .expect("Cannot serialize");
+                                    send_framed(connection_arc.clone(), serialized)
+                                        .await
+                                        .expect(&format!("Cannot send request to the server: {:?}", message));
+                                }
+                                None => {
+                                    info!("Channel closed.");
+                                    break;
+                                }
+                            }
+                        }
+                        _ = sh_rx.changed() => {
+                            info!("Channel closed.");
+                            break;
+                        }
                     }
                 }
             });

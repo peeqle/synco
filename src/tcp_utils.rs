@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::io::{ErrorKind, Write};
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -88,9 +90,10 @@ where
     Ok(())
 }
 
-pub async fn receive_frame<T>(connection: Arc<Mutex<T>>) -> Result<ServerRequest, CommonThreadError>
+pub async fn receive_frame<T,X>(connection: Arc<Mutex<T>>) -> Result<X, CommonThreadError>
 where
     T: AsyncRead + Unpin + Send + 'static,
+    X: DeserializeOwned
 {
     let mut mtx = connection.lock().await;
 
@@ -109,7 +112,7 @@ where
     let mut buffer = vec![0u8; len];
     mtx.read_exact(&mut buffer).await?;
 
-    let req = serde_json::from_slice::<ServerRequest>(&buffer)?;
+    let req = serde_json::from_slice::<X>(&buffer)?;
 
     Ok(req)
 }

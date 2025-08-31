@@ -50,8 +50,8 @@ pub mod data {
             .await
             .expect("Cannot create new TcpServer instance");
         Arc::new(tcp_server)
-    } 
-    
+    }
+
     pub async fn get_default_server() -> Arc<TcpServer> {
         let cp = DefaultServer.get_or_init(|| async { init_server().await }).await;
         cp.clone()
@@ -193,7 +193,7 @@ async fn open_device_connection(
         loop {
             let current_status = cp.connection_status.read().await;
 
-            if let Ok(frame) = receive_frame(cp.connection.clone()).await {
+            if let Ok(frame) = receive_frame::<_, ServerRequest>(cp.connection.clone()).await {
                 match *current_status {
                     Access => {
                         match frame {

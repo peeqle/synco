@@ -23,10 +23,14 @@ use std::sync::Arc;
 use tokio::sync::oneshot::{self, channel};
 use tokio::task;
 
+
+//todo future me create logic for handling runner state
+// from the handlers to menu components state via global ?state machine?
 type DStep = Box<dyn Step + Send + Sync>;
 lazy_static! {
     static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
         Box::new(StartServerStep::default()) as DStep,
+        Box::new(StartClientManagerStep::default()) as DStep,
         Box::new(ListKnownDevices {}) as DStep,
         Box::new(StartBroadcastStep::default()) as DStep,
         Box::new(ListChallenges {}) as DStep,
@@ -171,11 +175,87 @@ impl Step for StartServerStep {
     }
 }
 
+menu_step!(StartClientManagerStep);
+impl Step for StartClientManagerStep {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+        if self.invoked.load(SeqCst) {
+            info!("Client manager working already ...");
+            return Ok(false);
+        }
+        info!("Starting client manager...");
+
+        get_handle().spawn(async {
+            let client_manager = Arc::clone(&DefaultClientManager);
+            let handle = tokio::spawn(async move { client::run(client_manager.clone()).await });
+
+            JoinsChannel.0.clone().send(handle).expect("Cannot send");
+        });
+
+        self.invoked.store(true, SeqCst);
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
+    fn render(&self) {
+        println!("{}", self.display());
+    }
+
+    fn display(&self) -> &str {
+        "Enable client mode"
+    }
+}
+
+menu_step!(ReloadServerStep);
+impl Step for ReloadServerStep {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+
+        get_handle().spawn(async {
+            let default_server = get_default_server().await;
+            let client_manager = Arc::clone(&DefaultClientManager);
+
+            let handle = tokio::spawn(async move {
+                tokio::spawn(async move { server::run(default_server.clone()).await });
+                tokio::spawn(async move { client::run(client_manager.clone()).await });
+            });
+
+            JoinsChannel.0.clone().send(handle).expect("Cannot send");
+        });
+
+        self.invoked.store(true, SeqCst);
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        self.invoked.load(SeqCst)
+    }
+
+    fn render(&self) {
+        println!("{}", self.display());
+    }
+
+    fn display(&self) -> &str {
+        "Start server"
+    }
+}
+
 struct ListKnownDevices {}
 impl Step for ListKnownDevices {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let device_manager = Arc::clone(&DefaultDeviceManager);
-        
+
         let devices_future = task::spawn_blocking(move || {
             get_handle().block_on(async {
                 let mtx = device_manager.known_devices.read().await;
