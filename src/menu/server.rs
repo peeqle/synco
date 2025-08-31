@@ -11,6 +11,8 @@ use crate::server::data::get_default_server;
 use crate::server::model::ServerRequest;
 use crate::utils::encrypt_with_passphrase;
 use crate::{broadcast, challenge, client, get_handle, menu_step, server, JoinsChannel};
+use futures::executor::block_on;
+use futures::future;
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::{HashMap, LinkedList};
@@ -19,6 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use tokio::sync::oneshot::{self, channel};
+use tokio::task;
 
 type DStep = Box<dyn Step + Send + Sync>;
 lazy_static! {
@@ -105,7 +108,6 @@ impl Step for StartBroadcastStep {
             JoinsChannel.0.clone().send(handle).expect("Cannot send");
         });
 
-
         self.invoked.store(true, SeqCst);
 
         Ok(false)
@@ -135,7 +137,7 @@ impl Step for StartServerStep {
             info!("Server working already ...");
             return Ok(false);
         }
-        get_handle().spawn(async  {
+        get_handle().spawn(async {
             let default_server = get_default_server().await;
             let client_manager = Arc::clone(&DefaultClientManager);
 
@@ -173,26 +175,23 @@ struct ListKnownDevices {}
 impl Step for ListKnownDevices {
     fn action(&self) -> Result<bool, CommonThreadError> {
         let device_manager = Arc::clone(&DefaultDeviceManager);
-        let (tx, mut rx) = channel::<HashMap<String, DiscoveredDevice>>();
-
-        get_handle().spawn_blocking(async move || {
-            let devices = {
+        
+        let devices_future = task::spawn_blocking(move || {
+            get_handle().block_on(async {
                 let mtx = device_manager.known_devices.read().await;
                 mtx.clone()
-            };
-            tx.send(devices).expect("Cannot send known devices");
+            })
         });
-        let known_devices = rx.try_recv().unwrap_or_default();
+        let devices = futures::executor::block_on(devices_future).expect("");
 
-        println!("\n--- Known Devices ({} total) ---", known_devices.len());
-        for (id, device) in known_devices.iter() {
+        println!("\n--- Known Devices ({} total) ---", devices.len());
+        for (id, device) in devices.iter() {
             println!(
                 "  ID: {}, Addr: {}, Last Seen: {:?}",
                 id, device.connect_addr, device.last_seen
             );
         }
         println!("---------------------------------\n");
-
         Ok(false)
     }
 
@@ -216,62 +215,63 @@ impl Step for ListKnownDevices {
 struct ListChallenges {}
 impl Step for ListChallenges {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        get_handle().spawn_blocking(async move || {
-            let challenges = {
+        let future =get_handle().spawn_blocking(move || {
+           get_handle().block_on(async {
                 let challenge_manager = Arc::clone(&DefaultChallengeManager);
                 challenge_manager.current_challenges.read().await.clone()
-            };
+            })
+        });
+        let challenges = futures::executor::block_on(future).expect("Cannot block");
 
-            if challenges.is_empty() {
-                println!("----------------------------------");
-                println!("No challenges");
-                println!("----------------------------------");
-            } else {
-                println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
-                for (id, (i, ch)) in challenges.iter().enumerate() {
-                    match ch {
-                        DeviceChallengeStatus::Active {
-                            socket_addr,
-                            nonce,
-                            nonce_hash,
-                            salt,
-                            passphrase,
+        if challenges.is_empty() {
+            println!("----------------------------------");
+            println!("No challenges");
+            println!("----------------------------------");
+        } else {
+            println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
+            for (id, (i, ch)) in challenges.iter().enumerate() {
+                match ch {
+                    DeviceChallengeStatus::Active {
+                        socket_addr,
+                        nonce,
+                        nonce_hash,
+                        salt,
+                        passphrase,
+                        attempts,
+                        ttl,
+                    } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
                             attempts,
-                            ttl,
-                        } => {
-                            println!(
-                                "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
-                                id,
-                                i,
-                                socket_addr.ip().to_string(),
-                                attempts,
-                                ch.name()
-                            );
-                        }
-                        DeviceChallengeStatus::Closed { socket_addr } => {
-                            println!(
-                                "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
-                                id,
-                                i,
-                                socket_addr.ip().to_string(),
-                                "-",
-                                ch.name()
-                            );
-                        }
-                        DeviceChallengeStatus::Pending { socket_addr, nonce } => {
-                            println!(
-                                "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
-                                id,
-                                i,
-                                socket_addr.ip().to_string(),
-                                "-",
-                                ch.name()
-                            );
-                        }
+                            ch.name()
+                        );
+                    }
+                    DeviceChallengeStatus::Closed { socket_addr } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            "-",
+                            ch.name()
+                        );
+                    }
+                    DeviceChallengeStatus::Pending { socket_addr, nonce } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            "-",
+                            ch.name()
+                        );
                     }
                 }
             }
-        });
+        }
 
         Ok(false)
     }
@@ -325,23 +325,28 @@ impl Step for CompleteChallenge {
                         match challenge {
                             DeviceChallengeStatus::Pending { nonce, .. } => {
                                 println!("Enter passphrase: ");
-                                let passphrase = read_user_input().expect("Cannot read provided bytes");
+                                let passphrase =
+                                    read_user_input().expect("Cannot read provided bytes");
 
                                 let (ciphertext_with_tag, iv_bytes, salt) =
                                     encrypt_with_passphrase(&*nonce, passphrase.as_bytes())
                                         .expect("Cannot encrypt");
 
-
                                 get_handle().spawn_blocking(async move || {
-                                    if let Some(_sender)  = get_client_sender(device_id.clone()).await {
-                                        _sender.send(
-                                            ServerRequest::ChallengeResponse { iv_bytes, salt, ciphertext_with_tag }
-                                        ).await
+                                    if let Some(_sender) =
+                                        get_client_sender(device_id.clone()).await
+                                    {
+                                        _sender
+                                            .send(ServerRequest::ChallengeResponse {
+                                                iv_bytes,
+                                                salt,
+                                                ciphertext_with_tag,
+                                            })
+                                            .await
                                             .expect("Cannot send passphrase verification");
                                     }
                                     //todo make connection rollback if not persist
                                 });
-
                             }
                             _ => {
                                 println!("Cannot activate that channel");

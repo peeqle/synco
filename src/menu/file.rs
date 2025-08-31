@@ -2,16 +2,14 @@ use crate::consts::CommonThreadError;
 use crate::diff::files::{attach, remove};
 use crate::diff::Files;
 use crate::menu::{read_user_input, Action, Step};
-use crate::menu_step;
+use crate::{get_handle};
 use lazy_static::lazy_static;
 use log::error;
 use std::collections::LinkedList;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use tokio::runtime::Runtime;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::SeqCst;
+use tokio::task::spawn_blocking;
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct FileAction {
@@ -80,21 +78,17 @@ impl Step for SelectFileStep {
             let path_input = read_user_input()?;
             let path = PathBuf::from(path_input);
 
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create Tokio runtime");
-                let res = rt.block_on(attach(path));
-                let _ = tx.send(res);
-            });
+            let future = spawn_blocking(|| get_handle().block_on(attach(path)));
 
-            match rx.recv() {
-                Ok(Ok(())) => {
+            let res = futures::executor::block_on(future).expect("Cannot block future");
+
+            match res {
+                Ok(_) => {
                     valid_file = true;
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     error!("Cannot perform file attachment! \n {}", e);
                 }
-                Err(_) => {}
             }
         }
         Ok(false)
@@ -120,10 +114,8 @@ impl Step for SelectFileStep {
 struct DisplayFilesStep {}
 impl Step for DisplayFilesStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let rt = Runtime::new().expect("Failed to create Tokio runtime");
-            let result = rt.block_on(async {
+        let future = spawn_blocking(|| {
+            get_handle().block_on(async {
                 let files = Files.clone();
                 let mtx_guard = files.lock().await;
 
@@ -133,13 +125,14 @@ impl Step for DisplayFilesStep {
                     .collect();
 
                 formatted_strings
-            });
-            let _ = tx.send(result);
+            })
         });
 
-        if let Ok(result) = rx.recv() {
+        let res = futures::executor::block_on(future).expect("Cannot block future");
+
+        if !res.is_empty() {
             println!("Attached files:");
-            for i in result {
+            for i in res {
                 println!("{}", i);
             }
         }
@@ -152,7 +145,7 @@ impl Step for DisplayFilesStep {
     }
 
     fn invoked(&self) -> bool {
-       false
+        false
     }
 
     fn render(&self) {
@@ -170,23 +163,24 @@ impl Step for RemoveFileStep {
         print!("Select file to remove: ");
         let file_id = read_user_input()?;
 
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let rt = Runtime::new().expect("Failed to create Tokio runtime");
-            let res = rt.block_on(remove(&file_id));
-            let _ = tx.send(res);
+        let future = spawn_blocking(move || {
+            get_handle().block_on(async {
+                remove(&file_id).await
+            })
         });
 
-        match rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
+        let res = futures::executor::block_on(future).expect("Cannot block future");
+
+        match res {
+            Ok(_) => {}
+            Err(e) => {
                 return Err(Box::new(Error::new(
                     ErrorKind::Other,
                     format!("Cannot perform file attachment! \n {}", e),
                 )));
             }
-            Err(_) => {}
         }
+
         Ok(false)
     }
 

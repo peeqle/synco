@@ -1,7 +1,10 @@
 use crate::broadcast::DeviceConnectionState::NEW;
 use crate::challenge::{ChallengeEvent, DefaultChallengeManager};
-use crate::consts::{CommonThreadError, BROADCAST_INTERVAL_SECONDS, DEFAULT_SERVER_PORT, DISCOVERY_PORT};
-use crate::device_manager::{add_new_device, get_device, DefaultDeviceManager};
+use crate::consts::data::get_device_id;
+use crate::consts::{
+    BROADCAST_INTERVAL_SECONDS, CommonThreadError, DEFAULT_SERVER_PORT, DISCOVERY_PORT,
+};
+use crate::device_manager::{DefaultDeviceManager, add_new_device, get_device};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
@@ -9,8 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, Instant};
-use crate::consts::data::get_device_id;
+use tokio::time::{Instant, sleep};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveryMessage {
@@ -97,28 +99,29 @@ pub async fn start_listener() -> Result<(), CommonThreadError> {
         let current_device_id = get_device_id().await.clone();
         match serde_json::from_str::<DiscoveryMessage>(&message_str) {
             Ok(msg) => {
-                let remote_addr = msg
-                    .internal_ip
-                    .map_or(SocketAddr::new(peer_addr.ip(), msg.tcp_listening_port), |ip| {
-                        SocketAddr::new(ip, msg.tcp_listening_port)
-                    });
+                let remote_addr = msg.internal_ip.map_or(
+                    SocketAddr::new(peer_addr.ip(), msg.tcp_listening_port),
+                    |ip| SocketAddr::new(ip, msg.tcp_listening_port),
+                );
 
                 if msg.device_id != current_device_id {
-                    info!(
-                    "device {:?} device id : {:?} sender id: {:?}",
-                    msg,
-                    msg.device_id,
-                    current_device_id
-                );
                     let known_devices = {
                         let read_guard = device_manager_arc.known_devices.read().await;
                         read_guard.clone()
                     };
 
                     if !known_devices.contains_key(&msg.device_id) {
+                        info!(
+                            "device {:?} device id : {:?} sender id: {:?}",
+                            msg, msg.device_id, current_device_id
+                        );
                         add_new_device(msg.device_id.clone(), remote_addr).await;
 
-                        if msg.wants_to_connect && challenge_manager.can_request_new_connection(&msg.device_id).await {
+                        if msg.wants_to_connect
+                            && challenge_manager
+                                .can_request_new_connection(&msg.device_id)
+                                .await
+                        {
                             challenge_manager
                                 .get_sender()
                                 .send(ChallengeEvent::NewDevice {

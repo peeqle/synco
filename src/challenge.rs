@@ -7,7 +7,8 @@ use crate::server::model::{ServerResponse};
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
 use lazy_static::lazy_static;
-use log::debug;
+use log::{debug, info};
+use serde::de;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::error::Error;
@@ -195,6 +196,7 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
         if let Some(message) = receiver.recv().await {
             match message {
                 ChallengeEvent::NewDevice { device_id } => {
+                    info!("Registering new device: {}", device_id);
                     client_manager
                         .bounded_channel
                         .0
