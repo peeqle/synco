@@ -1,14 +1,11 @@
 use blake3::Hash;
 use log::error;
 use serde::{Deserialize, Serialize};
-use std::array::TryFromSliceError;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::time::Instant;
 use vis::vis;
-
+use crate::diff::point::SupportedExt;
 
 #[derive(Clone)]
 #[vis::vis(pub)]
@@ -76,5 +73,6 @@ pub struct FileEntityDto {
 #[derive(Clone)]
 pub struct SynchroPoint {
     pub path: PathBuf,
+    pub ext: SupportedExt,
     pub enabled: bool,
 }

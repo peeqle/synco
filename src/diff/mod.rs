@@ -6,23 +6,24 @@ use crate::consts::{CommonThreadError, BUFFER_SIZE};
 use crate::diff::model::{FileEntity, SynchroPoint};
 use crate::utils::get_files_dir;
 use lazy_static::lazy_static;
-use notify::Watcher;
 use std::collections::HashMap;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use uuid::Uuid;
+use crate::diff::point::SupportedExt::All;
 
 lazy_static! {
     pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> = {
+    pub static ref Points: Arc<Mutex<HashMap<String,SynchroPoint>>> = {
         let default_point_map = map::map!((
-            "ALL".to_string(),
+            Uuid::new_v4().to_string(),
             SynchroPoint {
                 path: get_files_dir(),
-                enabled: true
+                enabled: true,
+                ext: All
             }
         ));
         Arc::new(Mutex::new(default_point_map))
@@ -284,21 +285,18 @@ pub mod point {
     use crate::diff::{Points, SynchroPoint};
     use std::collections::hash_map::Entry;
     use std::path::PathBuf;
-
-    pub async fn get_point(target: &String) -> Option<SynchroPoint> {
-        let points = Points.lock().await;
-        points.get(target).cloned()
-    }
+    use crate::diff::point::SupportedExt::{All, Specified};
 
     pub async fn update_point(
-        file_extension: String,
+        id: String,
+        ext: SupportedExt,
         path: Option<PathBuf>,
         enabled: Option<bool>,
     ) -> Result<(), CommonThreadError> {
         let points_manager = Points.clone();
         let mut mtx = points_manager.lock().await;
 
-        match mtx.entry(file_extension.clone()) {
+        match mtx.entry(id.clone()) {
             Entry::Occupied(mut ent) => {
                 let ent_mut = ent.get_mut();
                 if let Some(path_opt) = path {
@@ -307,12 +305,15 @@ pub mod point {
                 if let Some(enabled_opt) = enabled {
                     ent_mut.enabled = enabled_opt;
                 }
+                
+                ent_mut.ext = ext;
             }
             Entry::Vacant(_) => {
                 if let Some(path_opt) = path {
                     mtx.insert(
-                        file_extension,
+                        id,
                         SynchroPoint {
+                            ext,
                             path: path_opt,
                             enabled: enabled.unwrap_or(true),
                         },
@@ -329,6 +330,12 @@ pub mod point {
 
         mtx.remove(&file_extension);
         Ok(())
+    }
+
+    #[derive(Clone)]
+    pub enum SupportedExt {
+        Specified(Vec<String>),
+        All
     }
 }
 

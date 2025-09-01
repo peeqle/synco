@@ -1,15 +1,17 @@
 use crate::consts::CommonThreadError;
-use crate::diff::point::{remove_point, update_point};
+use crate::diff::model::SynchroPoint;
+use crate::diff::point::SupportedExt::Specified;
+use crate::diff::point::{remove_point, update_point, SupportedExt};
 use crate::diff::Points;
-use crate::menu::{read_user_input, Action, Step};
 use crate::get_handle;
+use crate::menu::{read_user_input, Action, Step};
 use lazy_static::lazy_static;
+use std::ascii::AsciiExt;
 use std::collections::LinkedList;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::fs;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
 
 type DStep = Box<dyn Step + Send + Sync>;
 pub struct SyncAction {
@@ -71,89 +73,81 @@ impl Action for SyncAction {
 struct UpdateSyncPoint {}
 impl Step for UpdateSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        let mut valid_input = false;
-
-        while !valid_input {
-            println!("Enter synchronization dir ABSOLUTE path: ");
-            let path_input = read_user_input()?;
-            let path = PathBuf::from(path_input);
-
-            let mut point_creation = |path: PathBuf| -> Result<(), CommonThreadError> {
-                println!("Enable point[y/n]:");
-                let enabled_input = read_user_input()?;
-
-                println!("Extensions to sync here(blank for all, Ex.: txt,jpg,pdf):");
-                let extensions_input = read_user_input()?;
-
-                let mut cooked_extensions = Vec::new();
-                if !extensions_input.is_empty() {
-                    cooked_extensions = extensions_input
-                        .split(',')
-                        .map(|x| x.trim().to_string())
-                        .collect();
-                }
-
-                let (tx, mut rx) = oneshot::channel::<bool>();
-
-                get_handle().spawn_blocking(async move || {
-                    let runtime_handle_update = |ext, path, enabled_input: String| {
-                        update_point(
-                            ext,
-                            Some(path),
-                            match enabled_input.is_empty() {
-                                true => Some(true),
-                                false => Some(enabled_input.to_ascii_lowercase() == "y"),
-                            },
-                        )
+        DisplaySyncPoints {}.action()?;
+        println!("Select sync point: ");
+        if let Ok(pos) = read_user_input()?.parse::<usize>() {
+            let future = get_handle().spawn_blocking(move || {
+                get_handle().block_on(async {
+                    let existing_points= {
+                        let points = Points.clone();
+                        points.lock().await.clone()
                     };
 
-                    if cooked_extensions.is_empty() {
-                        match runtime_handle_update(
-                            "ALL".to_string(),
-                            path.clone(),
-                            enabled_input.clone(),
+                    if let Some((id, point)) = existing_points.iter().nth(pos) {
+                        println!("\t\tID\tEXT\t\t\tTYPE\tPATH\t\t\t\t\tENABLED\t");
+                        display_sync_point(pos, id, point);
+
+                        println!("LEAVE BLANK TO LEAVE UNTOUCHED\n---------------------------");
+                        println!("Enable point[y/n]:");
+                        let enabled_input: bool = match read_user_input() {
+                            Ok(input) => {
+                                if input.is_empty() {
+                                    point.enabled
+                                } else {
+                                    input.eq_ignore_ascii_case("y")
+                                }
+                            }
+                            Err(_) => false,
+                        };
+
+                        println!("Extensions to sync here(blank for skip, Ex.: txt,jpg,pdf):");
+                        let extensions_input = read_user_input().expect("Cannot read user input");
+
+                        let mut cooked_extensions = point.ext.clone();
+                        if !extensions_input.is_empty() {
+                            cooked_extensions = Specified(
+                                extensions_input
+                                    .split(',')
+                                    .map(|x| x.trim().to_string())
+                                    .collect(),
+                            );
+                        }
+
+                        println!("Enter synchronization dir ABSOLUTE path: ");
+                        let path_input = read_user_input().expect("Cannot read user input");
+                        let mut path = point.path.clone();
+                        if !path_input.is_empty() {
+                            path = PathBuf::from(path_input);
+
+                            if !&path.exists() || !&path.is_absolute() {
+                                println!("Cannot resolve provided path: {:?}", path);
+                                println!("Create dirs at {:?} ?[y/n]", path);
+                                if read_user_input()
+                                    .expect("Cannot read input")
+                                    .eq_ignore_ascii_case("y")
+                                {
+                                    fs::create_dir_all(&path).expect("Cannot create dirs");
+                                }
+                            }
+                        }
+
+                        if update_point(
+                            id.clone(),
+                            cooked_extensions,
+                            Some(path),
+                            Some(enabled_input),
                         )
                         .await
+                        .is_err()
                         {
-                            Ok(_) => {
-                                let _ = tx.send(true);
-                            }
-                            Err(_) => {
-                                println!("Cannot send update for Point");
-                                let _ = tx.send(false);
-                            }
+                            println!("Cannot update selected point");
                         }
-                    } else {
-                        //todo errors here - lazy
-                        for ext in cooked_extensions {
-                            runtime_handle_update(ext, path.clone(), enabled_input.clone())
-                                .await
-                                .expect("Cannot send update for Point");
-                        }
-                        let _ = tx.send(true);
                     }
                 });
-
-                match rx.try_recv() {
-                    Ok(x) => {
-                        valid_input = x;
-                    }
-                    Err(_) => {}
-                }
-                Ok(())
-            };
-
-            if !&path.exists() || !&path.is_absolute() {
-                println!("Cannot resolve provided path: {:?}", path);
-                println!("Create dirs at {:?} ?[y/n]", path);
-                if read_user_input()?.to_ascii_lowercase() == "y" {
-                    fs::create_dir_all(&path)?;
-                    point_creation(path.clone())?;
-                }
-            } else {
-                point_creation(path.clone())?;
-            }
+            });
+            futures::executor::block_on(future).expect("Cannot block");
         }
+
         Ok(false)
     }
 
@@ -174,6 +168,29 @@ impl Step for UpdateSyncPoint {
     }
 }
 
+struct CreateSyncPoint {}
+impl Step for CreateSyncPoint {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        todo!()
+    }
+
+    fn invoked(&self) -> bool {
+        todo!()
+    }
+
+    fn render(&self) {
+        todo!()
+    }
+
+    fn display(&self) -> &str {
+        todo!()
+    }
+}
+
 struct DisplaySyncPoints {}
 impl Step for DisplaySyncPoints {
     fn action(&self) -> Result<bool, CommonThreadError> {
@@ -183,9 +200,9 @@ impl Step for DisplaySyncPoints {
             let points = Points.clone();
             handle.block_on(async {
                 let mtx = points.lock().await;
-                println!("idx\tTYPE\tPATH\t\t\t\t\tENABLED\t");
+                println!("\t\tID\tEXT\t\t\tTYPE\tPATH\t\t\t\t\tENABLED\t");
                 for (idx, (ext, point)) in mtx.iter().enumerate() {
-                    println!("{}\t{}\t{:?}\t{}", idx, ext, point.path, point.enabled);
+                    display_sync_point(idx, ext, point);
                 }
             });
         });
@@ -241,4 +258,23 @@ impl Step for RemoveSyncPoint {
     fn display(&self) -> &str {
         "Select files to remove"
     }
+}
+
+fn display_sync_point(pos: usize, id: &String, point: &SynchroPoint) {
+    let mut extensions_unwrapped = String::new();
+    match &point.ext {
+        SupportedExt::Specified(vec) => {
+            vec.iter().for_each(|x| {
+                extensions_unwrapped.push_str(x);
+                extensions_unwrapped.push_str(" ");
+            });
+        }
+        SupportedExt::All => {
+            extensions_unwrapped.push_str("ALL");
+        }
+    }
+    println!(
+        "{}\t{}\t{}\t{:?}\t{}",
+        pos, id, extensions_unwrapped, point.path, point.enabled
+    );
 }

@@ -7,6 +7,7 @@ use lazy_static::lazy_static;
 use log::error;
 use std::collections::LinkedList;
 use std::io::{Error, ErrorKind};
+use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use tokio::task::spawn_blocking;
