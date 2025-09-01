@@ -4,6 +4,7 @@ mod util;
 
 use crate::consts::{CommonThreadError, BUFFER_SIZE};
 use crate::diff::model::{FileEntity, SynchroPoint};
+use crate::diff::point::SupportedExt::All;
 use crate::utils::get_files_dir;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -12,12 +13,11 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use crate::diff::point::SupportedExt::All;
 
 lazy_static! {
     pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    pub static ref Points: Arc<Mutex<HashMap<String,SynchroPoint>>> = {
+    pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> = {
         let default_point_map = map::map!((
             Uuid::new_v4().to_string(),
             SynchroPoint {
@@ -31,6 +31,7 @@ lazy_static! {
 }
 
 pub mod files {
+    use crate::consts::data::get_device_id;
     use crate::consts::{of_type, CommonThreadError};
     use crate::diff::consts::MAX_FILE_SIZE_BYTES;
     use crate::diff::files::SnapshotAction::Update;
@@ -51,7 +52,6 @@ pub mod files {
     use tokio::io::BufWriter;
     use tokio::sync::Notify;
     use uuid::Uuid;
-    use crate::consts::data::get_device_id;
 
     pub async fn get_seeding_files() -> Vec<FileEntityDto> {
         let files = Files.clone();
@@ -284,9 +284,22 @@ pub mod point {
     use crate::consts::CommonThreadError;
     use crate::diff::{Points, SynchroPoint};
     use std::collections::hash_map::Entry;
+    use std::io::ErrorKind;
     use std::path::PathBuf;
-    use crate::diff::point::SupportedExt::{All, Specified};
+    use uuid::Uuid;
 
+    pub async fn create_point(point: SynchroPoint) -> Result<(), CommonThreadError> {
+        let points_manager = Points.clone();
+        let mut mtx = points_manager.lock().await;
+
+        match mtx.insert(Uuid::new_v4().to_string(), point) {
+            None => Err(Box::new(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Cannot create new synchro point",
+            ))),
+            Some(_) => Ok(()),
+        }
+    }
     pub async fn update_point(
         id: String,
         ext: SupportedExt,
@@ -305,7 +318,7 @@ pub mod point {
                 if let Some(enabled_opt) = enabled {
                     ent_mut.enabled = enabled_opt;
                 }
-                
+
                 ent_mut.ext = ext;
             }
             Entry::Vacant(_) => {
@@ -335,7 +348,7 @@ pub mod point {
     #[derive(Clone)]
     pub enum SupportedExt {
         Specified(Vec<String>),
-        All
+        All,
     }
 }
 

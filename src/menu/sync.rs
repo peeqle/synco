@@ -1,16 +1,16 @@
 use crate::consts::CommonThreadError;
 use crate::diff::model::SynchroPoint;
-use crate::diff::point::SupportedExt::Specified;
-use crate::diff::point::{remove_point, update_point, SupportedExt};
+use crate::diff::point::SupportedExt::{All, Specified};
+use crate::diff::point::{create_point, remove_point, update_point, SupportedExt};
 use crate::diff::Points;
 use crate::get_handle;
 use crate::menu::{read_user_input, Action, Step};
 use lazy_static::lazy_static;
 use std::ascii::AsciiExt;
 use std::collections::LinkedList;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{fs, io};
 use tokio::runtime::Handle;
 
 type DStep = Box<dyn Step + Send + Sync>;
@@ -78,7 +78,7 @@ impl Step for UpdateSyncPoint {
         if let Ok(pos) = read_user_input()?.parse::<usize>() {
             let future = get_handle().spawn_blocking(move || {
                 get_handle().block_on(async {
-                    let existing_points= {
+                    let existing_points = {
                         let points = Points.clone();
                         points.lock().await.clone()
                     };
@@ -118,17 +118,7 @@ impl Step for UpdateSyncPoint {
                         let mut path = point.path.clone();
                         if !path_input.is_empty() {
                             path = PathBuf::from(path_input);
-
-                            if !&path.exists() || !&path.is_absolute() {
-                                println!("Cannot resolve provided path: {:?}", path);
-                                println!("Create dirs at {:?} ?[y/n]", path);
-                                if read_user_input()
-                                    .expect("Cannot read input")
-                                    .eq_ignore_ascii_case("y")
-                                {
-                                    fs::create_dir_all(&path).expect("Cannot create dirs");
-                                }
-                            }
+                            verify_path(&path);
                         }
 
                         if update_point(
@@ -171,6 +161,30 @@ impl Step for UpdateSyncPoint {
 struct CreateSyncPoint {}
 impl Step for CreateSyncPoint {
     fn action(&self) -> Result<bool, CommonThreadError> {
+        let future = get_handle().spawn_blocking(move || {
+            get_handle().block_on(async {
+                let path = get_path()
+                    .expect("Cannot read provided path");
+
+                println!("Enable point[y/n]:");
+                let enabled_input: bool = read_user_input()
+                    .unwrap_or("n".to_owned())
+                    .eq_ignore_ascii_case("y");
+
+                let cooked_extensions = get_extensions(None);
+
+                create_point(SynchroPoint {
+                    ext: cooked_extensions,
+                    path,
+                    enabled: enabled_input,
+                })
+                .await
+            })
+        });
+
+        if let Err(_) = futures::executor::block_on(future) {
+            print!("Error while creating new point...");
+        }
         Ok(false)
     }
 
@@ -277,4 +291,45 @@ fn display_sync_point(pos: usize, id: &String, point: &SynchroPoint) {
         "{}\t{}\t{}\t{:?}\t{}",
         pos, id, extensions_unwrapped, point.path, point.enabled
     );
+}
+
+fn get_path() -> Result<PathBuf, CommonThreadError> {
+    println!("Enter synchronization dir ABSOLUTE path: ");
+    let path_input = read_user_input().expect("Cannot read user input");
+
+    if path_input.is_empty() {
+        return Err(Box::new(io::Error::new(io::ErrorKind::Other, "Path cannot be empty")));
+    }
+    let path = PathBuf::from(path_input);
+    verify_path(&path);
+
+    Ok(path)
+}
+
+fn verify_path(path: &PathBuf) {
+    if !&path.exists() || !&path.is_absolute() {
+        println!("Cannot resolve provided path: {:?}", path);
+        println!("Create dirs at {:?} ?[y/n]", path);
+        if read_user_input()
+            .expect("Cannot read input")
+            .eq_ignore_ascii_case("y")
+        {
+            fs::create_dir_all(path).expect("Cannot create dirs");
+        }
+    }
+}
+
+fn get_extensions(initial: Option<SupportedExt>) -> SupportedExt {
+    println!("Extensions to sync here(blank for skip, Ex.: txt,jpg,pdf):");
+    let extensions_input = read_user_input().expect("Cannot read user input");
+    let mut cooked_extensions = initial.unwrap_or(All);
+    if !extensions_input.is_empty() {
+        cooked_extensions = Specified(
+            extensions_input
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .collect(),
+        );
+    }
+    cooked_extensions
 }
