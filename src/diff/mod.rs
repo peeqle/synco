@@ -15,8 +15,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 lazy_static! {
-    pub static ref Files: Arc<Mutex<HashMap<String, FileEntity>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    pub static ref Files: Arc<Mutex<Vec<FileEntity>>> = Arc::new(Mutex::new(vec![]));
     pub static ref Points: Arc<Mutex<HashMap<String, SynchroPoint>>> = {
         let default_point_map = map::map!((
             Uuid::new_v4().to_string(),
@@ -31,6 +30,7 @@ lazy_static! {
 }
 
 pub mod files {
+    use crate::client::{get_client_sender, try_connect};
     use crate::consts::data::get_device_id;
     use crate::consts::{of_type, CommonThreadError};
     use crate::diff::consts::MAX_FILE_SIZE_BYTES;
@@ -38,8 +38,10 @@ pub mod files {
     use crate::diff::model::{from_dto, FileEntity, FileEntityDto};
     use crate::diff::util::{blake_digest, verify_file_size, verify_permissions};
     use crate::diff::Files;
+    use crate::server::model::ServerRequest::FileRequest;
     use crate::utils::DirType::Cache;
     use crate::utils::{get_default_application_dir, get_files_dir, LockExt};
+    use log::{info, warn};
     use notify::event::{DataChange, ModifyKind, RemoveKind};
     use notify::{RecommendedWatcher, RecursiveMode, Watcher};
     use std::collections::hash_map::Entry;
@@ -58,13 +60,13 @@ pub mod files {
         let mtx = files.lock().await;
 
         let device_id = get_device_id().await;
-        mtx.values().map(|y| y.to_dto(&device_id)).collect()
+        mtx.iter().map(|y| y.to_dto(&device_id)).collect()
     }
 
     pub async fn get_file(file_id: &String) -> Option<FileEntity> {
         let file_manager = Arc::clone(&Files);
         let mtx = file_manager.lock().await;
-        mtx.get(file_id).cloned()
+        mtx.iter().find(|&x| x.id == *file_id).cloned()
     }
 
     pub async fn get_file_writer(
@@ -89,27 +91,25 @@ pub mod files {
         let file_manager = Files.clone();
         let mut mtx = file_manager.lock().await;
 
-        mtx.remove_entry(file_id).expect("Cannot remove entry");
+        mtx.retain(|x| x.id != *file_id);
         Ok(())
     }
 
     pub async fn append(file_dto: FileEntityDto) {
-        Files
-            .with_lock(move |collection| {
-                match collection.entry(file_dto.id.clone()) {
-                    Entry::Occupied(occupied_entry) => {
-                        //todo
-                        println!("entry exists");
-                    }
-                    Entry::Vacant(vacant_entry) => match from_dto(file_dto) {
-                        None => {}
-                        Some(ent) => {
-                            vacant_entry.insert(ent);
+        match get_file(&file_dto.id).await {
+            None => {
+                warn!("File already exists: {}", &file_dto.id);
+            }
+            Some(_) => {
+                Files
+                    .with_lock(move |collection| {
+                        if let Some(cooked_file) = from_dto(file_dto) {
+                            collection.push(cooked_file);
                         }
-                    },
-                }
-            })
-            .await;
+                    })
+                    .await;
+            }
+        };
     }
 
     pub async fn attach<T: AsRef<Path>>(path: T) -> Result<(), CommonThreadError> {
@@ -126,44 +126,39 @@ pub mod files {
 
         let metadata = fs::metadata(&path)?;
 
-        let file_manager = Files.clone();
-        let mut current_state = file_manager.lock().await;
+        let cp = Files.clone();
+        let mut mtx = cp.lock().await;
 
-        //todo change hash calculation to more multisystem approach, or sum calculation based on
-        // filename size + main_node postfix?
-        let blake_filepath_hash = blake_digest(&path)?;
-        match current_state.entry(blake3::hash(path.as_ref().as_os_str().as_bytes()).to_string()) {
-            Entry::Occupied(entry) => {
-                println!(
-                    "Recalculating hashes for {}",
-                    path.as_ref().to_str().unwrap()
-                );
-            }
-            Entry::Vacant(_) => {
-                current_state.insert(
-                    blake_filepath_hash.to_string(),
-                    FileEntity {
-                        id: Uuid::new_v4().to_string(),
-                        filename: String::from(
-                            PathBuf::from(path.as_ref())
-                                .file_name()
-                                .unwrap()
-                                .to_str()
-                                .unwrap(),
-                        ),
-                        size: metadata.len(),
-                        path: PathBuf::from(path.as_ref()),
-                        is_in_sync: false,
-                        snapshot_path: None,
-                        prev_hash: None,
-                        current_hash: blake_filepath_hash,
-                        main_node: get_device_id().await,
-                        synced_with: vec![],
-                        notify: Arc::new(Notify::new()),
-                    },
-                );
-            }
+        let device_id = get_device_id().await;
+        if let None  =mtx.iter_mut()
+            .find(|file| file.main_node_id == device_id && file.path.eq(path.as_ref())) {
+            let hash = blake_digest(path.as_ref())?;
+
+            mtx.push(
+                FileEntity {
+                    id: Uuid::new_v4().to_string(),
+                    filename: String::from(
+                        PathBuf::from(path.as_ref())
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap(),
+                    ),
+                    size: metadata.len(),
+                    path: PathBuf::from(path.as_ref()),
+                    is_in_sync: false,
+                    snapshot_path: None,
+                    prev_hash: None,
+                    current_hash: hash,
+                    main_node_id: get_device_id().await,
+                    synced_with: vec![],
+                    notify: Arc::new(Notify::new()),
+                },
+            );
+        }else {
+            info!("File exists");
         }
+
         Ok(())
     }
 
@@ -202,25 +197,41 @@ pub mod files {
         Remove,
     }
 
-    pub async fn file_sync<T: AsRef<Path>>(path: T, file: &FileEntity) {
+    pub async fn file_sync(file: &FileEntity) {
         let file_manager = Files.clone();
         let notify_future = Arc::clone(&file.notify);
 
-        let path_arc = Arc::new(path.as_ref().to_path_buf());
+        let file_id = file.id.clone();
         tokio::spawn(async move {
             loop {
                 notify_future.notified().await;
-
                 let mut mtx = file_manager.lock().await;
-                let path_key = blake3::hash(path_arc.as_os_str().as_bytes()).to_string();
 
-                if let Some(entry) = mtx.get_mut(&path_key) {
-                    //send changes to node
-
+                if let Some(entry) = mtx.iter_mut().find(|x| x.id == file_id) {
                     snapshot(entry, Update).expect("Cannot create file snapshot");
                 }
             }
         });
+    }
+
+    pub async fn request_file(file_id: &String) -> Result<(), CommonThreadError> {
+        if let Some(file) = get_file(file_id).await {
+            //send file request to the node
+            if let Some(sender) = get_client_sender(&file.main_node_id).await {
+                info!("Requested file: {}", &file.id);
+                return match sender.send(FileRequest(file.id.clone())).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(Box::new(io::Error::new(
+                        ErrorKind::BrokenPipe,
+                        format!("{:?}", e),
+                    ))),
+                };
+            }
+        }
+        Err(Box::new(io::Error::new(
+            ErrorKind::NotFound,
+            "No file found",
+        )))
     }
 
     pub async fn check_file_change(file: &FileEntity) -> RecommendedWatcher {

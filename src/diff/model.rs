@@ -19,7 +19,7 @@ pub struct FileEntity {
     current_hash: Hash,
     is_in_sync: bool,
     //devices in-sync
-    main_node: String,
+    main_node_id: String,
     synced_with: Vec<String>,
     notify: Arc<Notify>,
 }
@@ -48,7 +48,7 @@ pub fn from_dto(dto: FileEntityDto) -> Option<FileEntity> {
                 prev_hash: None,
                 current_hash: hash,
                 is_in_sync: false,
-                main_node: dto.node_id,
+                main_node_id: dto.node_id,
                 synced_with: vec![],
                 notify: Arc::new(Default::default()),
             });

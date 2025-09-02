@@ -1,4 +1,9 @@
-use crate::consts::{DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR, DEFAULT_SERVER_CERT_STORAGE};
+use crate::consts::{
+    DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR,
+    DEFAULT_SERVER_CERT_STORAGE,
+};
+use crate::get_handle;
+use crate::keychain::data::get_signing_key;
 use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
@@ -13,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 use tokio::sync::Mutex;
-use crate::keychain::data::get_signing_key;
+use tokio::task::spawn_blocking;
 
 pub mod control {
     use std::error::Error;

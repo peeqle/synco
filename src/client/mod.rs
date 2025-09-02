@@ -13,6 +13,7 @@ use crate::server::model::{ConnectionState, ServerRequest, ServerResponse};
 use crate::tcp_utils::{receive_file_chunked, receive_frame, send_framed};
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
+use futures::future::err;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use rustls::client::WebPkiServerVerifier;
@@ -66,11 +67,11 @@ pub struct ClientManager {
     ),
 }
 
-pub async fn get_client_sender(device_id: String) -> Option<mpsc::Sender<ServerRequest>> {
+pub async fn get_client_sender(device_id: &String) -> Option<mpsc::Sender<ServerRequest>> {
     let cp = DefaultClientManager.clone();
     let mtx = cp.connections.read().await;
 
-    if let Some(client) = mtx.get(&device_id) {
+    if let Some(client) = mtx.get(device_id) {
         let cp = client.connection.clone();
         let mtx = cp.lock().await;
 
@@ -468,13 +469,17 @@ fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<boo
                             ServerResponse::FileMetadata { file_id, size } => {
                                 if let Some(existing_file) = get_file(&file_id).await {
                                     if let Ok(file_writer) = get_file_writer(&existing_file).await {
-                                        receive_file_chunked(
+                                        match receive_file_chunked(
                                             Arc::clone(&connection_reader),
                                             size,
                                             file_writer,
                                         )
-                                        .await
-                                        .expect(&format!("Cannot receive file {}", file_id));
+                                        .await {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                 error!("Cannot receive file {}: {:?}", file_id, e);
+                                            }
+                                        }
                                     }
                                 }
                             }

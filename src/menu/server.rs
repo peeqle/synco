@@ -23,7 +23,6 @@ use std::sync::Arc;
 use tokio::sync::oneshot::{self, channel};
 use tokio::task;
 
-
 //todo future me create logic for handling runner state
 // from the handlers to menu components state via global ?state machine?
 type DStep = Box<dyn Step + Send + Sync>;
@@ -216,7 +215,6 @@ impl Step for StartClientManagerStep {
 menu_step!(ReloadServerStep);
 impl Step for ReloadServerStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
-
         get_handle().spawn(async {
             let default_server = get_default_server().await;
             let client_manager = Arc::clone(&DefaultClientManager);
@@ -295,8 +293,8 @@ impl Step for ListKnownDevices {
 struct ListChallenges {}
 impl Step for ListChallenges {
     fn action(&self) -> Result<bool, CommonThreadError> {
-        let future =get_handle().spawn_blocking(move || {
-           get_handle().block_on(async {
+        let future = get_handle().spawn_blocking(move || {
+            get_handle().block_on(async {
                 let challenge_manager = Arc::clone(&DefaultChallengeManager);
                 challenge_manager.current_challenges.read().await.clone()
             })
@@ -413,9 +411,7 @@ impl Step for CompleteChallenge {
                                         .expect("Cannot encrypt");
 
                                 get_handle().spawn_blocking(async move || {
-                                    if let Some(_sender) =
-                                        get_client_sender(device_id.clone()).await
-                                    {
+                                    if let Some(_sender) = get_client_sender(&device_id).await {
                                         _sender
                                             .send(ServerRequest::ChallengeResponse {
                                                 iv_bytes,
