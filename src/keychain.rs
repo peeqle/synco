@@ -21,6 +21,7 @@ use std::io::{BufReader, Cursor, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::{error, fs, io};
 use crate::consts::data::get_device_id;
+use crate::machine_utils::get_local_ip;
 
 pub mod data {
     use crate::keychain::load_signing_key_or_create;
@@ -641,7 +642,7 @@ pub async fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let ca_cert = ca_params.self_signed(&ca_key_pair)?;
 
     let mut params =
-        CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])?;
+        CertificateParams::new(get_default_crt_namespace()?)?;
     let mut cert_name = DistinguishedName::new();
 
     cert_name.push(DnType::OrganizationName, get_device_id().await.to_string());
@@ -704,15 +705,7 @@ fn create_root_ca_params() -> Result<CertificateParams, CommonThreadError> {
 fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
     use crate::machine_utils::get_local_ip;
 
-    let local_ip = get_local_ip().ok_or("Could not determine local IP address")?;
-
-    let san_entries = vec![
-        local_ip.to_string(),
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-    ];
-
-    let mut ca_params = CertificateParams::new(san_entries)?;
+    let mut ca_params = CertificateParams::new(get_default_crt_namespace()?)?;
     ca_params.distinguished_name = DistinguishedName::new();
     ca_params
         .distinguished_name
@@ -747,4 +740,16 @@ pub async fn generate_keypair() -> Result<KeyPair, Box<dyn Error + Sync + Send>>
         .map_err(|e| Box::new(e) as CommonThreadError)?;
 
     Ok(rcgen_key_pair)
+}
+
+fn get_default_crt_namespace() -> Result<Vec<String>, CommonThreadError> {
+    let local_ip = get_local_ip().ok_or("Could not determine local IP address")?;
+
+    let san_entries = vec![
+        local_ip.to_string(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
+    Ok(san_entries)
 }

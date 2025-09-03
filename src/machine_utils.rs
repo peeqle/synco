@@ -13,5 +13,7 @@ pub fn get_local_ip() -> Option<IpAddr> {
         return Some(*ipaddr);
     }
 
+    info!("Using default device WLP address");
+
     Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)))
 }
