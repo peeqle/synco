@@ -7,6 +7,7 @@ use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManag
 use crate::diff::files::{get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
+use crate::server::data::get_default_server;
 use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
 use crate::server::model::{
     Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
@@ -16,7 +17,7 @@ use crate::server::util::is_tcp_port_available;
 use crate::tcp_utils::{receive_frame, send_file_chunked, send_framed};
 use crate::CommonThreadError;
 use lazy_static::lazy_static;
-use log::{error, info};
+use log::{debug, error, info};
 use model::ConnectionState;
 use rustls::{server, ServerConnection};
 use std::error::Error;
@@ -32,16 +33,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task;
-use crate::server::data::get_default_server;
 
 pub mod model;
 mod util;
 
-
 pub mod data {
+    use crate::server::model::{ServerActivity, TcpServer};
     use std::sync::Arc;
     use tokio::sync::{mpsc, Mutex, OnceCell};
-    use crate::server::model::{ServerActivity, TcpServer};
 
     static DefaultServer: OnceCell<Arc<TcpServer>> = OnceCell::const_new();
     pub async fn init_server() -> Arc<TcpServer> {
@@ -53,11 +52,12 @@ pub mod data {
     }
 
     pub async fn get_default_server() -> Arc<TcpServer> {
-        let cp = DefaultServer.get_or_init(|| async { init_server().await }).await;
+        let cp = DefaultServer
+            .get_or_init(|| async { init_server().await })
+            .await;
         cp.clone()
     }
 }
-
 
 pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sync>> {
     info!("Starting server...");
@@ -194,6 +194,7 @@ async fn open_device_connection(
             let current_status = cp.connection_status.read().await;
 
             if let Ok(frame) = receive_frame::<_, ServerRequest>(cp.connection.clone()).await {
+                debug!("[RECV:{:?}] {:?}", *current_status,  frame);
                 match *current_status {
                     Access => {
                         match frame {

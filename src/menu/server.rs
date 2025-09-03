@@ -29,6 +29,7 @@ type DStep = Box<dyn Step + Send + Sync>;
 lazy_static! {
     static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
         Box::new(StartServerStep::default()) as DStep,
+        Box::new(ReloadServerStep::default()) as DStep,
         Box::new(StartClientManagerStep::default()) as DStep,
         Box::new(ListKnownDevices {}) as DStep,
         Box::new(StartBroadcastStep::default()) as DStep,
@@ -142,13 +143,11 @@ impl Step for StartServerStep {
         }
         get_handle().spawn(async {
             let default_server = get_default_server().await;
-            let client_manager = Arc::clone(&DefaultClientManager);
 
+            //гыгы thread делает скидыщ - todo
             let handle = tokio::spawn(async move {
                 tokio::spawn(async move { server::run(default_server.clone()).await });
-                tokio::spawn(async move { client::run(client_manager.clone()).await });
             });
-
             JoinsChannel.0.clone().send(handle).expect("Cannot send");
         });
 
