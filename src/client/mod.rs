@@ -35,6 +35,7 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::{spawn_blocking, JoinHandle};
 use tokio::time::timeout;
 use tokio_rustls::{TlsConnector, TlsStream};
+use vis::vis;
 
 lazy_static! {
     pub static ref DefaultClientManager: Arc<ClientManager> = {
@@ -59,9 +60,10 @@ pub enum ClientActivity {
     },
 }
 
+#[vis(pub)]
 pub struct ClientManager {
     connections: Arc<RwLock<HashMap<String, TcpClient>>>,
-    pub bounded_channel: (
+    bounded_channel: (
         mpsc::Sender<ClientActivity>,
         Mutex<Receiver<ClientActivity>>,
     ),

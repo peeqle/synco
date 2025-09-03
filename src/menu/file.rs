@@ -1,8 +1,10 @@
+use crate::client::DefaultClientManager;
 use crate::consts::CommonThreadError;
 use crate::diff::files::{attach, get_file, remove, request_file};
 use crate::diff::Files;
 use crate::get_handle;
 use crate::menu::{read_user_input, Action, Step};
+use crate::server::model::{ConnectionState, ServerRequest};
 use lazy_static::lazy_static;
 use log::error;
 use std::collections::LinkedList;
@@ -24,6 +26,7 @@ lazy_static! {
         Box::new(RemoveFileStep {}) as DStep,
         Box::new(DisplayFilesStep {}) as DStep,
         Box::new(RequestFileStep {}) as DStep,
+        Box::new(CollectSharingFilesData {}) as DStep,
     ]));
 }
 
@@ -161,6 +164,57 @@ impl Step for DisplayFilesStep {
     }
 }
 
+struct CollectSharingFilesData {}
+impl Step for CollectSharingFilesData {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+        let future = spawn_blocking(move || {
+            get_handle().block_on(async {
+                let cp = DefaultClientManager.clone();
+                let mtx = cp.connections.read().await;
+
+                if mtx.is_empty() {
+                    println!("No peers known");
+                } else {
+                    for (_, tcp_client) in mtx.iter() {
+                        let connection_arc = tcp_client.connection.clone();
+                        let conn_mtx = connection_arc.lock().await;
+
+                        if let Some(connection) = conn_mtx.as_ref() {
+                            if matches!(connection.connection_status, ConnectionState::Access) {
+                                let _ = connection
+                                    .request_sender
+                                    .clone()
+                                    .send(ServerRequest::SeedingFiles)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            })
+        });
+
+        futures::executor::block_on(future).expect("Cannot block future");
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        false
+    }
+
+    fn render(&self) {
+        print!("{}", self.display());
+    }
+
+    fn display(&self) -> &str {
+        "Ask peers for files"
+    }
+}
+
 struct RequestFileStep {}
 impl Step for RequestFileStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
@@ -184,11 +238,17 @@ impl Step for RequestFileStep {
                                 Ok(_) => {
                                     println!(
                                         "{}",
-                                        &format!("Scheduled for synchronization: {}", &hypothetical_file_id)
+                                        &format!(
+                                            "Scheduled for synchronization: {}",
+                                            &hypothetical_file_id
+                                        )
                                     );
                                 }
                                 Err(_) => {
-                                    println!("{}", &format!("Cannot synchronize: {}", &hypothetical_file_id));
+                                    println!(
+                                        "{}",
+                                        &format!("Cannot synchronize: {}", &hypothetical_file_id)
+                                    );
                                 }
                             }
                         }

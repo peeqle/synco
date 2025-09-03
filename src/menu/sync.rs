@@ -84,7 +84,7 @@ impl Step for UpdateSyncPoint {
                     };
 
                     if let Some((id, point)) = existing_points.iter().nth(pos) {
-                        println!("\t\tID\tEXT\t\t\tTYPE\tPATH\t\t\t\t\tENABLED\t");
+                        println!("ID\tEXT\t\t\t\tTYPE\t\tPATH\t\t\t\t\tENABLED\t");
                         display_sync_point(pos, id, point);
 
                         println!("LEAVE BLANK TO LEAVE UNTOUCHED\n---------------------------");
@@ -214,7 +214,7 @@ impl Step for DisplaySyncPoints {
             let points = Points.clone();
             handle.block_on(async {
                 let mtx = points.lock().await;
-                println!("\t\tID\tEXT\t\t\tTYPE\tPATH\t\t\t\t\tENABLED\t");
+                println!("N\tID\t\t\t\t\tTYPE\tPATH\t\t\t\t\tENABLED\t");
                 for (idx, (ext, point)) in mtx.iter().enumerate() {
                     display_sync_point(idx, ext, point);
                 }
