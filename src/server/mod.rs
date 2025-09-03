@@ -1,6 +1,7 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::DeviceChallengeStatus::Active;
 use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
+use crate::client::{get_client_connection, get_client_sender};
 use crate::consts::data::get_device_id;
 use crate::consts::{of_type, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};
@@ -126,7 +127,7 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
                         connecting_device_option,
                     )
                     .await
-                    .expect("Ca,npub device_id: String,not handle device session");
+                    .expect("Cant establish secure connection to the device");
                 }
                 Err(e) => {
                     eprintln!("TLS handshake failed with {}: {}", peer_addr, e);
@@ -136,6 +137,9 @@ pub async fn start_server(server: Arc<TcpServer>) -> Result<(), CommonThreadErro
     }
 }
 
+/*
+Opening server requests transmitter and Sending session authorization request to the client
+ */
 async fn handle_device_connection(
     server_arc: Arc<TcpServer>,
     tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
@@ -158,7 +162,13 @@ async fn handle_device_connection(
             open_device_connection(device_connection, res_sender).await;
         }
 
+
         let device_id = connecting_device.device_id.clone();
+        let _ = server_arc.bounded_channel.0.clone()
+            .send(ServerActivity::SendChallenge {
+                device_id: device_id.clone()
+            }).await;
+
         tokio::spawn(async move {
             let connected_device_id = device_id.clone();
 
@@ -190,6 +200,7 @@ async fn open_device_connection(
     let cp = device_connection.clone();
 
     tokio::spawn(async move {
+        debug!("DEVICE CONNECTION OPENED");
         loop {
             let current_status = cp.connection_status.read().await;
 
@@ -258,8 +269,7 @@ async fn open_device_connection(
                             .0
                             .clone()
                             .send(ServerActivity::SendChallenge {
-                                device_id: cp.device_id.clone(),
-                                connection: cp.connection.clone(),
+                                device_id: cp.device_id.clone()
                             })
                             .await
                             .expect("Cannot send");
@@ -290,12 +300,11 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError>
     let mut receiver = server_cp.bounded_channel.1.lock().await;
     while let Some(message) = receiver.recv().await {
         match message {
-            ServerActivity::SendChallenge {
-                device_id,
-                connection,
-            } => {
-                if let Ok(challenge) = get_serialized_challenge(device_id).await {
-                    send_framed(connection.clone(), challenge).await?;
+            ServerActivity::SendChallenge { device_id } => {
+                if let Ok(challenge) = get_serialized_challenge(&device_id).await {
+                    if let Some(connection) = get_client_connection(&device_id).await {
+                        send_framed(connection.clone(), challenge).await?;
+                    }
                 }
             }
             ServerActivity::VerifiedChallenge { device_id } => {
@@ -320,9 +329,9 @@ async fn send_response_to_client(
 }
 
 async fn get_serialized_challenge(
-    device_id: String,
+    device_id: &String,
 ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
-    let challenge_query = generate_challenge(device_id.clone()).await?;
+    let challenge_query = generate_challenge(&device_id).await?;
     let serialized = serde_json::to_vec(&challenge_query)?;
     Ok(serialized)
 }

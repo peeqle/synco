@@ -34,7 +34,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::{spawn_blocking, JoinHandle};
 use tokio::time::timeout;
-use tokio_rustls::{TlsConnector, TlsStream};
+use tokio_rustls::{client, TlsConnector, TlsStream};
 use vis::vis;
 
 lazy_static! {
@@ -84,6 +84,21 @@ pub async fn get_client_sender(device_id: &String) -> Option<mpsc::Sender<Server
     None
 }
 
+pub async fn get_client_connection(device_id: &String) -> Option<Arc<Mutex<client::TlsStream<TcpStream>>>> {
+    let cp = DefaultClientManager.clone();
+    let mtx = cp.connections.read().await;
+
+    if let Some(client) = mtx.get(device_id) {
+        let cp = client.connection.clone();
+        let mtx = cp.lock().await;
+
+        if let Some(conn) = mtx.as_ref() {
+            return Some(conn.connection.clone());
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug)]
 pub struct TcpClient {
     server_id: String,
@@ -92,7 +107,7 @@ pub struct TcpClient {
 }
 #[derive(Debug)]
 pub struct ClientTcpPeer {
-    pub connection: Arc<Mutex<tokio_rustls::client::TlsStream<TcpStream>>>,
+    pub connection: Arc<Mutex<client::TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
     pub request_sender: mpsc::Sender<ServerRequest>,
     pub shutdown_channel: watch::Sender<bool>,

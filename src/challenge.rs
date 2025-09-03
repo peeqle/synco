@@ -344,7 +344,7 @@ async fn verify_challenge(
 * and nonce UUID, encoded with Aes128Gcm, amounts of retries of each client is set to base 3 for handling bruteforce
 */
 pub async fn generate_challenge(
-    device_id: String,
+    device_id: &String,
 ) -> Result<ServerResponse, Box<dyn Error + Send + Sync>> {
     debug!("Generating a challenge for: {}", device_id);
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
@@ -357,14 +357,14 @@ pub async fn generate_challenge(
         .write()
         .await;
 
-    match get_device(&device_id).await {
+    match get_device(device_id).await {
         None => {
             return Err(Box::new(io::Error::new(
                 ErrorKind::NotFound,
                 "No device discovered for challenge",
             )));
         }
-        Some(device) => match current_challenges.get(&device.device_id) {
+        Some(device) => match current_challenges.get(device_id) {
             None => {
                 current_challenges.insert(
                     device_id.clone(),

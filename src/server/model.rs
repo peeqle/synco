@@ -20,7 +20,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 use tokio_rustls::server::TlsStream;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{client, TlsAcceptor};
 use vis::vis;
 
 impl TcpServer {
@@ -182,7 +182,7 @@ pub enum ServerResponse {
 
 #[derive(Debug, Clone)]
 pub enum ServerActivity {
-    SendChallenge { device_id: String , connection: Arc<Mutex<TlsStream<TcpStream>>>},
+    SendChallenge { device_id: String},
     VerifiedChallenge { device_id: String },
 }
 

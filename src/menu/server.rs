@@ -29,7 +29,6 @@ type DStep = Box<dyn Step + Send + Sync>;
 lazy_static! {
     static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
         Box::new(StartServerStep::default()) as DStep,
-        Box::new(ReloadServerStep::default()) as DStep,
         Box::new(StartClientManagerStep::default()) as DStep,
         Box::new(ListKnownDevices {}) as DStep,
         Box::new(StartBroadcastStep::default()) as DStep,
@@ -259,7 +258,7 @@ impl Step for ListKnownDevices {
                 mtx.clone()
             })
         });
-        let devices = futures::executor::block_on(devices_future).expect("");
+        let devices = block_on(devices_future).expect("");
 
         println!("\n--- Known Devices ({} total) ---", devices.len());
         for (id, device) in devices.iter() {
