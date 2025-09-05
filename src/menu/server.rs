@@ -210,43 +210,6 @@ impl Step for StartClientManagerStep {
     }
 }
 
-menu_step!(ReloadServerStep);
-impl Step for ReloadServerStep {
-    fn action(&self) -> Result<bool, CommonThreadError> {
-        get_handle().spawn(async {
-            let default_server = get_default_server().await;
-            let client_manager = Arc::clone(&DefaultClientManager);
-
-            let handle = tokio::spawn(async move {
-                tokio::spawn(async move { server::run(default_server.clone()).await });
-                tokio::spawn(async move { client::run(client_manager.clone()).await });
-            });
-
-            JoinsChannel.0.clone().send(handle).expect("Cannot send");
-        });
-
-        self.invoked.store(true, SeqCst);
-
-        Ok(false)
-    }
-
-    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
-        None
-    }
-
-    fn invoked(&self) -> bool {
-        self.invoked.load(SeqCst)
-    }
-
-    fn render(&self) {
-        println!("{}", self.display());
-    }
-
-    fn display(&self) -> &str {
-        "Start server"
-    }
-}
-
 struct ListKnownDevices {}
 impl Step for ListKnownDevices {
     fn action(&self) -> Result<bool, CommonThreadError> {
@@ -294,18 +257,53 @@ impl Step for ListChallenges {
         let future = get_handle().spawn_blocking(move || {
             get_handle().block_on(async {
                 let challenge_manager = Arc::clone(&DefaultChallengeManager);
-                challenge_manager.current_challenges.read().await.clone()
+                (challenge_manager.current_challenges.read().await.clone(), challenge_manager.challenges.read().await.clone())
             })
         });
-        let challenges = futures::executor::block_on(future).expect("Cannot block");
+        let (current_challenges, challeneges)
+            = block_on(future).expect("Cannot block");
 
-        if challenges.is_empty() {
+        if current_challenges.is_empty() {
             println!("----------------------------------");
             println!("No challenges");
             println!("----------------------------------");
         } else {
             println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
-            for (id, (i, ch)) in challenges.iter().enumerate() {
+            for (id, (i, ch)) in current_challenges.iter().enumerate() {
+                match ch {
+                    DeviceChallengeStatus::Closed { socket_addr } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            "-",
+                            ch.name()
+                        );
+                    }
+                    DeviceChallengeStatus::Pending { socket_addr, nonce } => {
+                        println!(
+                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
+                            id,
+                            i,
+                            socket_addr.ip().to_string(),
+                            "-",
+                            ch.name()
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        println!("Incoming requests challenges\n");
+        if challeneges.is_empty() {
+            println!("----------------------------------");
+            println!("No challenges");
+            println!("----------------------------------");
+        } else {
+            println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
+            for (id, (i, ch)) in challeneges.iter().enumerate() {
                 match ch {
                     DeviceChallengeStatus::Active {
                         socket_addr,
@@ -335,16 +333,7 @@ impl Step for ListChallenges {
                             ch.name()
                         );
                     }
-                    DeviceChallengeStatus::Pending { socket_addr, nonce } => {
-                        println!(
-                            "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",
-                            id,
-                            i,
-                            socket_addr.ip().to_string(),
-                            "-",
-                            ch.name()
-                        );
-                    }
+                    _ => {}
                 }
             }
         }
@@ -373,7 +362,7 @@ struct CompleteChallenge {}
 impl Step for CompleteChallenge {
     fn action(&self) -> Result<bool, CommonThreadError> {
         ListChallenges {}.action()?;
-
+        
         let futures = task::spawn_blocking(|| {
             get_handle().block_on(async {
                 let challenges = {
@@ -385,7 +374,7 @@ impl Step for CompleteChallenge {
             })
         });
 
-        let challenges = futures::executor::block_on(futures).expect("");
+        let challenges = block_on(futures).expect("");
 
 
         if !challenges.is_empty() {

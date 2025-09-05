@@ -38,7 +38,7 @@ pub struct ChallengeManager {
     //incoming challenges
     pub current_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
     //only active challenges for devices
-    challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
+    pub(crate) challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
     //receiver for emitted connection event
     bounded_channel: (Sender<ChallengeEvent>, Mutex<Receiver<ChallengeEvent>>),
 }
@@ -252,6 +252,7 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
                         }
                     }
                 }
+                //incoming
                 ChallengeEvent::NewChallengeRequest { device_id, nonce } => {
                     let device = get_device(&device_id).await;
                     if let Some(_device) = device {
@@ -295,7 +296,7 @@ async fn verify_challenge(
 ) -> Result<(bool, bool), CommonThreadError> {
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
-    let mut challenges = challenge_manager.current_challenges.write().await;
+    let mut challenges = challenge_manager.challenges.write().await;
     let sent_challenge = challenges.get_mut(device_id);
 
     if let Some(challenge) = sent_challenge {
@@ -314,7 +315,7 @@ async fn verify_challenge(
                 *attempts -= 1;
 
                 if *attempts == 0u8 {
-                    let mut challenges = challenge_manager.current_challenges.write().await;
+                    let mut challenges = challenge_manager.challenges.write().await;
                     challenges.remove_entry(device_id);
 
                     challenges.insert(
@@ -328,7 +329,7 @@ async fn verify_challenge(
 
                 return Ok((false, false));
             } else {
-                let mut challenges = challenge_manager.current_challenges.write().await;
+                let mut challenges = challenge_manager.challenges.write().await;
                 challenges.remove_entry(device_id);
 
                 return Ok((true, false));
@@ -353,7 +354,7 @@ pub async fn generate_challenge(
     let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
 
     let mut current_challenges = default_challenge_manager_arc
-        .current_challenges
+        .challenges
         .write()
         .await;
 
