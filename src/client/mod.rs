@@ -470,6 +470,7 @@ fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<boo
             tokio::select! {
                 req = receive_frame::<_, ServerResponse>(connection_reader.clone()) => {
                     if let Ok(request) = req {
+                        println!("Got request: {:?}", request);
                         match request {
                             ServerResponse::ChallengeRequest { device_id, nonce } => {
                                 challenge_manager

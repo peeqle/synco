@@ -8,7 +8,7 @@ use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManag
 use crate::diff::files::{get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
-use crate::server::data::get_default_server;
+use crate::server::data::{get_default_server, smoke_client_pipe};
 use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
 use crate::server::model::{
     Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
@@ -41,7 +41,9 @@ mod util;
 pub mod data {
     use crate::server::model::{ServerActivity, TcpServer};
     use std::sync::Arc;
+    use tokio::net::TcpStream;
     use tokio::sync::{mpsc, Mutex, OnceCell};
+    use tokio_rustls::server::TlsStream;
 
     static DefaultServer: OnceCell<Arc<TcpServer>> = OnceCell::const_new();
     pub async fn init_server() -> Arc<TcpServer> {
@@ -57,6 +59,21 @@ pub mod data {
             .get_or_init(|| async { init_server().await })
             .await;
         cp.clone()
+    }
+
+    /**
+    Recv server-established connection via server::stream
+    CLIENT stream in DefaultClientManager
+    */
+    pub async fn smoke_client_pipe(client_id: &String) -> Option<Arc<Mutex<TlsStream<TcpStream>>>> {
+        let cp = get_default_server().await.connected_devices.clone();
+        let mtx = cp.lock().await;
+
+        if let Some(client) = mtx.get(client_id) {
+            return Some(client.connection.clone());
+        }
+
+        None
     }
 }
 
@@ -293,6 +310,9 @@ async fn open_device_connection(
     });
 }
 
+
+//revision 0509 transmit via server tcp connection to client in order
+// to escape connection inconsistency over tcp established sessions - todo review possibilities of transmission over client::tcp_stream
 async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError> {
     let server_cp = Arc::clone(&server);
 
@@ -301,7 +321,7 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError>
         match message {
             ServerActivity::SendChallenge { device_id } => {
                 if let Ok(challenge) = get_serialized_challenge(&device_id).await {
-                    if let Some(connection) = get_client_connection(&device_id).await {
+                    if let Some(connection) = smoke_client_pipe(&device_id).await {
                         debug!("Sent connection challenge");
                         send_framed(connection.clone(), challenge).await?;
                     }

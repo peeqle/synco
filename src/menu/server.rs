@@ -297,7 +297,7 @@ impl Step for ListChallenges {
             println!("No challenges");
             println!("----------------------------------");
         } else {
-            println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
+            println!("IDX\t|\t\tDEV_ID\t\t\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
             for (id, (i, ch)) in current_challenges.iter().enumerate() {
                 match ch {
                     DeviceChallengeStatus::Closed { socket_addr } => {
@@ -331,7 +331,7 @@ impl Step for ListChallenges {
             println!("No challenges");
             println!("----------------------------------");
         } else {
-            println!("IDX\t|\t\tDEV_ID\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
+            println!("IDX\t|\t\tDEV_ID\t\t\t\tSOCKET\t\tATTEMPTS\t\tSTATUS");
             for (id, (i, ch)) in challeneges.iter().enumerate() {
                 match ch {
                     DeviceChallengeStatus::Active {

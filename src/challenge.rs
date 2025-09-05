@@ -134,7 +134,7 @@ impl ChallengeManager {
     }
 
     pub async fn can_request_new_connection(&self, device_id: &String) -> bool {
-        let challenges = self.current_challenges.read().await;
+        let challenges = self.challenges.read().await;
         !challenges.contains_key(device_id)
     }
 }
@@ -353,7 +353,7 @@ pub async fn generate_challenge(
 
     let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
 
-    let mut current_challenges = default_challenge_manager_arc
+    let mut challenges = default_challenge_manager_arc
         .challenges
         .write()
         .await;
@@ -365,9 +365,9 @@ pub async fn generate_challenge(
                 "No device discovered for challenge",
             )));
         }
-        Some(device) => match current_challenges.get(device_id) {
+        Some(device) => match challenges.get(device_id) {
             None => {
-                current_challenges.insert(
+                challenges.insert(
                     device_id.clone(),
                     Active {
                         socket_addr: device.connect_addr,

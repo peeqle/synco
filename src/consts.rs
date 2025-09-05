@@ -54,4 +54,4 @@ pub const BUFFER_SIZE: usize = 16 * 1024;
 
 pub const CLEANUP_DELAY: u64 = 5;
 pub const CHALLENGE_DEATH: u64 = 160;
-pub const BROADCAST_INTERVAL_SECONDS: u64 = 2;
+pub const BROADCAST_INTERVAL_SECONDS: u64 = 1;
