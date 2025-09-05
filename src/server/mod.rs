@@ -303,6 +303,7 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError>
             ServerActivity::SendChallenge { device_id } => {
                 if let Ok(challenge) = get_serialized_challenge(&device_id).await {
                     if let Some(connection) = get_client_connection(&device_id).await {
+                        debug!("Sent connection challenge");
                         send_framed(connection.clone(), challenge).await?;
                     }
                 }

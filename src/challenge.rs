@@ -3,27 +3,27 @@ use crate::client::ClientActivity::{ChangeStatus, OpenConnection};
 use crate::client::DefaultClientManager;
 use crate::consts::{CommonThreadError, CHALLENGE_DEATH};
 use crate::device_manager::get_device;
-use crate::server::model::{ServerResponse};
+use crate::server::model::ConnectionState::{Access, Denied};
+use crate::server::model::ServerResponse;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
 use lazy_static::lazy_static;
 use log::{debug, info};
 use serde::de;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{self, HashMap};
 use std::error::Error;
 use std::io;
-use std::io::{ErrorKind};
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::sync::Arc;
-use std::time::{Duration};
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock, RwLockWriteGuard};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
-use crate::server::model::ConnectionState::{Access, Denied};
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -32,9 +32,13 @@ lazy_static! {
     };
 }
 
+//todo remove two duplicated fields for in/out auth segregation
 pub struct ChallengeManager {
     //device_id -> _, nonce hash, ttl
+    //incoming challenges
     pub current_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
+    //only active challenges for devices
+    challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
     //receiver for emitted connection event
     bounded_channel: (Sender<ChallengeEvent>, Mutex<Receiver<ChallengeEvent>>),
 }
@@ -81,8 +85,8 @@ impl DeviceChallengeStatus {
     pub fn name(&self) -> &str {
         match &self {
             Active { .. } => "ACTIVE",
-            DeviceChallengeStatus::Pending { .. } => "PENDING",
-            DeviceChallengeStatus::Closed { .. } => "CLOSED",
+            Pending { .. } => "PENDING",
+            Closed { .. } => "CLOSED",
         }
     }
 }
@@ -120,6 +124,7 @@ impl ChallengeManager {
     ) -> ChallengeManager {
         ChallengeManager {
             current_challenges: RwLock::new(HashMap::new()),
+            challenges: RwLock::new(HashMap::new()),
             bounded_channel,
         }
     }
@@ -140,45 +145,43 @@ pub async fn run(manager: Arc<ChallengeManager>) {
         tokio::spawn(cleanup()),
     );
 }
-
 pub async fn cleanup() {
     let challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
-    loop {
-        let now = Instant::now();
-        let mut challenges_to_notify_closed: Vec<String> = Vec::new();
 
-        {
-            challenges_arc_clone
-                .current_challenges
-                .write()
-                .await
-                .retain(|device_id, status| match status {
-                    Active {
-                        ttl, socket_addr, ..
-                    } => {
-                        if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
-                            println!(
-                                "[CLEANUP] Device {} challenge expired. Transitioning to Closed.",
-                                device_id
-                            );
-                            *status = DeviceChallengeStatus::Closed {
-                                socket_addr: *socket_addr,
-                            };
-                            challenges_to_notify_closed.push(device_id.clone());
-                        }
-                        true
-                    }
-                    DeviceChallengeStatus::Closed { .. } => {
+    let expiration_retainer_fn = |now: Instant, mut collection: RwLockWriteGuard<HashMap<String, DeviceChallengeStatus>>| {
+            collection.retain(|device_id, status| {
+                if let Active {
+                    ttl, socket_addr, ..
+                } = status
+                {
+                    if now.duration_since(*ttl).as_secs() >= CHALLENGE_DEATH {
                         println!(
-                            "[CLEANUP] Removing already Closed challenge for device {}.",
+                            "[CLEANUP] Device {} challenge expired. Transitioning to Closed.",
                             device_id
                         );
-                        false
+                        *status = Closed {
+                            socket_addr: *socket_addr,
+                        };
                     }
-                    _ => true,
-                });
-        }
-        sleep(Duration::from_secs(15)).await;
+                    true
+                } else if let Closed { .. } = status {
+                    println!(
+                        "[CLEANUP] Removing already Closed challenge for device {}.",
+                        device_id
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        };
+    loop {
+        let now = Instant::now();
+
+        expiration_retainer_fn(now, challenges_arc_clone.current_challenges.write().await);
+        expiration_retainer_fn(now, challenges_arc_clone.challenges.write().await);
+
+        tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
 
@@ -225,21 +228,21 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
                             .0
                             .send(ChangeStatus {
                                 device_id: device_id.clone(),
-                                status: Access
+                                status: Access,
                             })
                             .await
                             .expect(&format!(
                                 "Cannot send request for changing status: {}",
                                 device_id
                             ));
-                    }else {
+                    } else {
                         if close_connection {
                             client_manager
                                 .bounded_channel
                                 .0
                                 .send(ChangeStatus {
                                     device_id: device_id.clone(),
-                                    status: Denied
+                                    status: Denied,
                                 })
                                 .await
                                 .expect(&format!(
@@ -260,7 +263,7 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
                                     mtx.insert(
                                         device_id,
                                         Pending {
-                                            socket_addr: _device.connect_addr.clone(),
+                                            socket_addr: _device.connect_addr,
                                             nonce,
                                         },
                                     );
@@ -270,7 +273,7 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
                                 mtx.insert(
                                     device_id,
                                     Pending {
-                                        socket_addr: _device.connect_addr.clone(),
+                                        socket_addr: _device.connect_addr,
                                         nonce,
                                     },
                                 );
@@ -289,50 +292,47 @@ async fn verify_challenge(
     salt: [u8; 16],
     ciphertext_with_tag: Vec<u8>,
     //is_valid, close_connection
-) -> Result<(bool,bool), CommonThreadError> {
+) -> Result<(bool, bool), CommonThreadError> {
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
     let mut challenges = challenge_manager.current_challenges.write().await;
     let sent_challenge = challenges.get_mut(device_id);
 
     if let Some(challenge) = sent_challenge {
-        match challenge {
-            Active {
+        if let Active {
                 passphrase,
                 nonce_hash,
                 attempts,
                 socket_addr,
                 ..
-            } => {
-                let decrypted_hash =
-                    decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, &passphrase)
-                        .expect("Cannot decrypt");
+            } = challenge {
+            let decrypted_hash =
+                decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, &passphrase)
+                    .expect("Cannot decrypt");
 
-                if !decrypted_hash.eq(nonce_hash) {
-                    *attempts -= 1;
+            if !decrypted_hash.eq(nonce_hash) {
+                *attempts -= 1;
 
-                    if *attempts == 0u8 {
-                        let mut challenges = challenge_manager.current_challenges.write().await;
-                        challenges.remove_entry(device_id);
-
-                        challenges.insert(
-                            device_id.clone(),
-                            Closed {
-                                socket_addr: socket_addr.clone(),
-                            },
-                        );
-                        return Ok((false,true))
-                    }
-
-                    return Ok((false, false));
-                } else {
+                if *attempts == 0u8 {
                     let mut challenges = challenge_manager.current_challenges.write().await;
                     challenges.remove_entry(device_id);
 
-                    return Ok((true, false));
+                    challenges.insert(
+                        device_id.clone(),
+                        Closed {
+                            socket_addr: socket_addr.clone(),
+                        },
+                    );
+                    return Ok((false, true));
                 }
+
+                return Ok((false, false));
+            } else {
+                let mut challenges = challenge_manager.current_challenges.write().await;
+                challenges.remove_entry(device_id);
+
+                return Ok((true, false));
             }
-            _ => {}
         }
     }
 

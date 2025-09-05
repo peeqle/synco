@@ -373,20 +373,20 @@ struct CompleteChallenge {}
 impl Step for CompleteChallenge {
     fn action(&self) -> Result<bool, CommonThreadError> {
         ListChallenges {}.action()?;
-        let (tx, mut rx) = oneshot::channel::<HashMap<String, DeviceChallengeStatus>>();
-        get_handle().spawn_blocking(async move || {
-            let challenges = {
-                let challenge_manager = Arc::clone(&DefaultChallengeManager);
-                challenge_manager.current_challenges.read().await.clone()
-            };
 
-            let _ = tx.send(challenges);
+        let futures = task::spawn_blocking(|| {
+            get_handle().block_on(async {
+                let challenges = {
+                    let challenge_manager = Arc::clone(&DefaultChallengeManager);
+                    challenge_manager.current_challenges.read().await.clone()
+                };
+
+                challenges
+            })
         });
 
-        let mut challenges = HashMap::<String, DeviceChallengeStatus>::new();
-        if let Ok(ch) = rx.try_recv() {
-            challenges = ch.clone();
-        };
+        let challenges = futures::executor::block_on(futures).expect("");
+
 
         if !challenges.is_empty() {
             println!("Select option:");
