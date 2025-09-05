@@ -81,8 +81,8 @@ pub async fn run(server: Arc<TcpServer>) -> Result<(), Box<dyn Error + Send + Sy
     info!("Starting server...");
     let res = tokio::join!(
         tokio::spawn(start_server(Arc::clone(&server))),
-        tokio::spawn(listen_actions(Arc::clone(&server))),
         tokio::spawn(start_signing_server()),
+        tokio::spawn(listen_actions(Arc::clone(&server))),
     );
     Ok(())
 }
@@ -178,13 +178,16 @@ async fn handle_device_connection(
 
             open_device_connection(device_connection, res_sender).await;
         }
-
-
+        
         let device_id = connecting_device.device_id.clone();
-        let _ = server_arc.bounded_channel.0.clone()
+        let _ = server_arc
+            .bounded_channel
+            .0
+            .clone()
             .send(ServerActivity::SendChallenge {
-                device_id: device_id.clone()
-            }).await;
+                device_id: device_id.clone(),
+            })
+            .await;
 
         tokio::spawn(async move {
             let connection = {
@@ -221,7 +224,7 @@ async fn open_device_connection(
             let current_status = cp.connection_status.read().await;
 
             if let Ok(frame) = receive_frame::<_, ServerRequest>(cp.connection.clone()).await {
-                debug!("[RECV:{:?}] {:?}", *current_status,  frame);
+                debug!("[RECV:{:?}] {:?}", *current_status, frame);
                 match *current_status {
                     Access => {
                         match frame {
@@ -285,7 +288,7 @@ async fn open_device_connection(
                             .0
                             .clone()
                             .send(ServerActivity::SendChallenge {
-                                device_id: cp.device_id.clone()
+                                device_id: cp.device_id.clone(),
                             })
                             .await
                             .expect("Cannot send");
@@ -309,7 +312,6 @@ async fn open_device_connection(
         }
     });
 }
-
 
 //revision 0509 transmit via server tcp connection to client in order
 // to escape connection inconsistency over tcp established sessions - todo review possibilities of transmission over client::tcp_stream

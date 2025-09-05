@@ -25,6 +25,7 @@ use std::io::ErrorKind;
 use std::ops::DerefMut;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::thread::sleep;
 use std::time::Duration;
 use std::{io, mem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -84,7 +85,9 @@ pub async fn get_client_sender(device_id: &String) -> Option<mpsc::Sender<Server
     None
 }
 
-pub async fn get_client_connection(device_id: &String) -> Option<Arc<Mutex<client::TlsStream<TcpStream>>>> {
+pub async fn get_client_connection(
+    device_id: &String,
+) -> Option<Arc<Mutex<client::TlsStream<TcpStream>>>> {
     let cp = DefaultClientManager.clone();
     let mtx = cp.connections.read().await;
 
@@ -101,7 +104,6 @@ pub async fn get_client_connection(device_id: &String) -> Option<Arc<Mutex<clien
 
 #[derive(Clone, Debug)]
 pub struct TcpClient {
-    server_id: String,
     configuration: Arc<ClientConfig>,
     pub connection: Arc<Mutex<Option<ClientTcpPeer>>>,
 }
@@ -116,7 +118,6 @@ pub struct ClientTcpPeer {
 impl TcpClient {
     pub fn new(server_id: String) -> Result<TcpClient, CommonThreadError> {
         Ok(TcpClient {
-            server_id: server_id.clone(),
             configuration: Arc::new(Self::create_client_config(server_id.clone())?),
             connection: Arc::new(Mutex::new(None)),
         })
@@ -146,7 +147,6 @@ impl TcpClient {
         }
 
         Ok(TcpClient {
-            server_id: server_id.clone(),
             configuration: Arc::new(Self::create_client_config(server_id.clone())?),
             connection: Arc::new(Mutex::new(None)),
         })
@@ -322,7 +322,7 @@ pub async fn create_client(device_id: String) {
             );
         }
         //close active connections and replace with new ones
-        close_connection(&device_id).await;
+        // close_connection(&device_id).await;
         match open_connection(device_id.clone()).await {
             Ok(_) => {
                 info!("Connection opened successfully for device: {}", device_id);
@@ -465,47 +465,55 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<bool>) {
     let challenge_manager = DefaultChallengeManager.clone();
     let connection_reader = Arc::clone(&peer.connection);
+
     tokio::spawn(async move {
         loop {
+            debug!("HEAR ME OUT");
             tokio::select! {
                 req = receive_frame::<_, ServerResponse>(connection_reader.clone()) => {
-                    if let Ok(request) = req {
-                        println!("Got request: {:?}", request);
-                        match request {
-                            ServerResponse::ChallengeRequest { device_id, nonce } => {
-                                challenge_manager
-                                    .get_sender()
-                                    .send(NewChallengeRequest { device_id, nonce })
-                                    .await
-                                    .expect("Cannot send");
-                            }
-                            ServerResponse::SeedingFiles { shared_files } => {
-                                for file_data in shared_files {
-                                    append(file_data).await;
+                     match req {
+                        Ok(request) => {
+                            println!("Got request: {:?}", request);
+                            match request {
+                                ServerResponse::ChallengeRequest { device_id, nonce } => {
+                                    challenge_manager
+                                        .get_sender()
+                                        .send(NewChallengeRequest { device_id, nonce })
+                                        .await
+                                        .expect("Cannot send");
                                 }
-                            }
-                            ServerResponse::FileMetadata { file_id, size } => {
-                                if let Some(existing_file) = get_file(&file_id).await {
-                                    if let Ok(file_writer) = get_file_writer(&existing_file).await {
-                                        match receive_file_chunked(
-                                            Arc::clone(&connection_reader),
-                                            size,
-                                            file_writer,
-                                        )
-                                        .await {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                 error!("Cannot receive file {}: {:?}", file_id, e);
+                                ServerResponse::SeedingFiles { shared_files } => {
+                                    for file_data in shared_files {
+                                        append(file_data).await;
+                                    }
+                                }
+                                ServerResponse::FileMetadata { file_id, size } => {
+                                    if let Some(existing_file) = get_file(&file_id).await {
+                                        if let Ok(file_writer) = get_file_writer(&existing_file).await {
+                                            match receive_file_chunked(
+                                                Arc::clone(&connection_reader),
+                                                size,
+                                                file_writer,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => {}
+                                                Err(e) => {
+                                                    error!("Cannot receive file {}: {:?}", file_id, e);
+                                                }
                                             }
                                         }
                                     }
                                 }
+                                ServerResponse::Error { .. } => {}
+                                _ => {}
                             }
-                            ServerResponse::Error { .. } => {}
-                            _ => {}
+                        }
+                        Err(e) => {
+                            error!("Error: {}", e);
+                            tokio::time::sleep(Duration::from_secs(10)).await;
                         }
                     }
-
                 }
                 _ = sh_rx.changed() => {
                     debug!("Closing server connection...");
