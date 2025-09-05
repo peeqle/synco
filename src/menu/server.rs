@@ -28,6 +28,7 @@ use tokio::task;
 type DStep = Box<dyn Step + Send + Sync>;
 lazy_static! {
     static ref ActionSteps: Arc<LinkedList<DStep>> = Arc::new(LinkedList::from([
+        Box::new(StartDefaultStep {}) as DStep,
         Box::new(StartServerStep::default()) as DStep,
         Box::new(StartClientManagerStep::default()) as DStep,
         Box::new(ListKnownDevices {}) as DStep,
@@ -84,6 +85,34 @@ impl Action for ServerAction {
         })
     }
 }
+
+struct StartDefaultStep {}
+impl Step for StartDefaultStep {
+    fn action(&self) -> Result<bool, CommonThreadError> {
+        StartBroadcastStep::default().action()?;
+        StartServerStep::default().action()?;
+        StartClientManagerStep::default().action()?;
+
+        Ok(false)
+    }
+
+    fn next_step(&self) -> Option<Box<dyn Step + Send + Sync>> {
+        None
+    }
+
+    fn invoked(&self) -> bool {
+        false
+    }
+
+    fn render(&self) {
+        println!("{}", self.display());
+    }
+
+    fn display(&self) -> &str {
+        "Start default(Broadcast, Server, Client)"
+    }
+}
+
 menu_step!(StartBroadcastStep);
 impl Step for StartBroadcastStep {
     fn action(&self) -> Result<bool, CommonThreadError> {
@@ -362,7 +391,7 @@ struct CompleteChallenge {}
 impl Step for CompleteChallenge {
     fn action(&self) -> Result<bool, CommonThreadError> {
         ListChallenges {}.action()?;
-        
+
         let futures = task::spawn_blocking(|| {
             get_handle().block_on(async {
                 let challenges = {

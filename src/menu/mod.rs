@@ -2,6 +2,7 @@ mod file;
 mod server;
 mod sync;
 
+use crate::consts::data::get_device_id;
 use crate::consts::CommonThreadError;
 use crate::menu::file::FileAction;
 use crate::menu::server::ServerAction;
@@ -10,6 +11,9 @@ use lazy_static::lazy_static;
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::AtomicBool;
+use futures::executor::block_on;
+use tokio::task;
+use crate::get_handle;
 
 lazy_static! {
     static ref ActionMap: BTreeMap<i64, Box<dyn Action + Send + Sync>> = {
@@ -23,7 +27,15 @@ lazy_static! {
 }
 
 pub fn display_menu() {
+    let future = task::spawn_blocking(|| {
+       get_handle().block_on(async {
+           get_device_id().await
+       })
+    });
+
+    let device_id = block_on(future).expect("Cannot get device_id");
     loop {
+        println!("{}{}{}", "\x1B[1;32m", device_id,"\x1B[0m");
         for (id, entry) in ActionMap.iter() {
             print!("{}.", id);
             entry.render();

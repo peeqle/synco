@@ -170,11 +170,9 @@ async fn handle_device_connection(
             }).await;
 
         tokio::spawn(async move {
-            let connected_device_id = device_id.clone();
-
             let connection = {
                 let connected_devices_arc = server_arc.connected_devices.lock().await;
-                if let Some(con) = connected_devices_arc.get(&connected_device_id) {
+                if let Some(con) = connected_devices_arc.get(&device_id) {
                     con.connection.clone()
                 } else {
                     return;
@@ -183,6 +181,7 @@ async fn handle_device_connection(
 
             loop {
                 while let Some(message) = res_receiver.recv().await {
+                    debug!("Sending to client: {:?}", message);
                     send_response_to_client(connection.clone(), message.clone())
                         .await
                         .expect(&format!("Cannot send message to the client: {:?}", message));
