@@ -8,7 +8,7 @@ use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManag
 use crate::diff::files::{get_file, get_seeding_files};
 use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
-use crate::server::data::{get_default_server, smoke_client_pipe};
+use crate::server::data::{get_default_server, get_server_peer};
 use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
 use crate::server::model::{
     Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
@@ -17,6 +17,7 @@ use crate::server::model::{
 use crate::server::util::is_tcp_port_available;
 use crate::tcp_utils::{receive_frame, send_file_chunked, send_framed};
 use crate::CommonThreadError;
+use futures::future::err;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use model::ConnectionState;
@@ -41,9 +42,9 @@ mod util;
 pub mod data {
     use crate::server::model::{ServerActivity, TcpServer};
     use std::sync::Arc;
-    use tokio::net::TcpStream;
     use tokio::sync::{mpsc, Mutex, OnceCell};
-    use tokio_rustls::server::TlsStream;
+
+    use super::model::ServerTcpPeer;
 
     static DefaultServer: OnceCell<Arc<TcpServer>> = OnceCell::const_new();
     pub async fn init_server() -> Arc<TcpServer> {
@@ -65,15 +66,16 @@ pub mod data {
     Recv server-established connection via server::stream
     CLIENT stream in DefaultClientManager
     */
-    pub async fn smoke_client_pipe(client_id: &String) -> Option<Arc<Mutex<TlsStream<TcpStream>>>> {
-        let cp = get_default_server().await.connected_devices.clone();
+    pub async fn get_server_peer(client_id: &String) -> Option<Arc<ServerTcpPeer>> {
+        let server = get_default_server().await;
+        let cp = server.connected_devices.clone();
         let mtx = cp.lock().await;
 
         if let Some(client) = mtx.get(client_id) {
-            return Some(client.connection.clone());
+            Some(client.clone())
+        } else {
+            None
         }
-
-        None
     }
 }
 
@@ -168,17 +170,19 @@ async fn handle_device_connection(
         {
             let cp = server_arc.connected_devices.clone();
             let mut mtx = cp.lock().await;
-            let device_connection = mtx
+            let device_arc = mtx
                 .entry(connecting_device.device_id.clone())
-                .or_insert_with(|| ServerTcpPeer {
-                    device_id: connecting_device.device_id.clone(),
-                    connection: Arc::new(Mutex::new(tls_stream)),
-                    connection_status: Arc::new(RwLock::new(Unknown)),
+                .or_insert_with(|| {
+                    Arc::new(ServerTcpPeer {
+                        device_id: connecting_device.device_id.clone(),
+                        connection: Mutex::new(tls_stream),
+                        connection_status: RwLock::new(Unknown),
+                    })
                 });
 
-            open_device_connection(device_connection, res_sender).await;
+            open_device_connection(device_arc.clone(), res_sender).await;
         }
-        
+
         let device_id = connecting_device.device_id.clone();
         let _ = server_arc
             .bounded_channel
@@ -190,19 +194,23 @@ async fn handle_device_connection(
             .await;
 
         tokio::spawn(async move {
-            let connection = {
-                let connected_devices_arc = server_arc.connected_devices.lock().await;
-                if let Some(con) = connected_devices_arc.get(&device_id) {
-                    con.connection.clone()
+            let cp = server_arc.connected_devices.clone();
+            let connection_arc = {
+                let connected_devices_guard = cp.lock().await;
+
+                if let Some(device_peer) = connected_devices_guard.get(&device_id) {
+                    device_peer.clone()
                 } else {
                     return;
                 }
             };
 
+            let connection_mutex = &connection_arc.connection;
+
             loop {
                 while let Some(message) = res_receiver.recv().await {
                     debug!("Sending to client: {:?}", message);
-                    send_response_to_client(connection.clone(), message.clone())
+                    send_response_to_client(connection_mutex, message.clone())
                         .await
                         .expect(&format!("Cannot send message to the client: {:?}", message));
                 }
@@ -213,101 +221,104 @@ async fn handle_device_connection(
 }
 
 async fn open_device_connection(
-    device_connection: &mut ServerTcpPeer,
+    device_connection: Arc<ServerTcpPeer>,
     sender: Sender<ServerResponse>,
 ) {
-    let cp = device_connection.clone();
-
     tokio::spawn(async move {
         debug!("DEVICE CONNECTION OPENED");
+        let dcp = device_connection.clone();
         loop {
-            let current_status = cp.connection_status.read().await;
+            let current_status = dcp.connection_status.read().await;
+            let frame = { receive_frame::<_, ServerRequest>(&dcp.connection).await };
 
-            if let Ok(frame) = receive_frame::<_, ServerRequest>(cp.connection.clone()).await {
-                debug!("[RECV:{:?}] {:?}", *current_status, frame);
-                match *current_status {
-                    Access => {
-                        match frame {
-                            ServerRequest::ChallengeResponse {
-                                iv_bytes,
-                                salt,
-                                ciphertext_with_tag,
-                            } => {
-                                let challenge_manager = DefaultChallengeManager.clone();
-                                challenge_manager
-                                    .get_sender()
-                                    .send(ChallengeEvent::ChallengeVerification {
-                                        device_id: cp.device_id.clone(),
-                                        iv_bytes,
-                                        salt,
-                                        ciphertext_with_tag,
-                                    })
-                                    .await
-                                    .expect("Cannot send");
-                            }
-                            ServerRequest::RejectConnection(_) => {
-                                //todo
-                            }
-                            ServerRequest::FileRequest(file_id) => {
-                                if let Some(file) = get_file(&file_id).await {
-                                    send_file_chunked(cp.connection.clone(), &file)
+            match frame {
+                Ok(frame) => {
+                    debug!("[RECV:{:?}] {:?}", *current_status, frame);
+                    match *current_status {
+                        Access => {
+                            match frame {
+                                ServerRequest::ChallengeResponse {
+                                    iv_bytes,
+                                    salt,
+                                    ciphertext_with_tag,
+                                } => {
+                                    let challenge_manager = DefaultChallengeManager.clone();
+                                    challenge_manager
+                                        .get_sender()
+                                        .send(ChallengeEvent::ChallengeVerification {
+                                            device_id: dcp.device_id.clone(),
+                                            iv_bytes,
+                                            salt,
+                                            ciphertext_with_tag,
+                                        })
                                         .await
-                                        .expect("Error while sending file");
+                                        .expect("Cannot send");
+                                }
+                                ServerRequest::RejectConnection(_) => {
+                                    //todo
+                                }
+                                ServerRequest::FileRequest(file_id) => {
+                                    if let Some(file) = get_file(&file_id).await {
+                                        send_file_chunked(&dcp.connection, &file)
+                                            .await
+                                            .expect("Error while sending file");
+                                    }
+                                }
+                                ServerRequest::SeedingFiles => {
+                                    sender
+                                        .send(ServerResponse::SeedingFiles {
+                                            shared_files: get_seeding_files().await,
+                                        })
+                                        .await
+                                        .expect("Cannot send");
+                                }
+                                _ => {
+                                    sender
+                                        .send(ServerResponse::Error {
+                                            message: "Connection already established".to_string(),
+                                        })
+                                        .await
+                                        .expect("Cannot send");
                                 }
                             }
-                            ServerRequest::SeedingFiles => {
-                                sender
-                                    .send(ServerResponse::SeedingFiles {
-                                        shared_files: get_seeding_files().await,
-                                    })
-                                    .await
-                                    .expect("Cannot send");
-                            }
-                            _ => {
-                                sender
-                                    .send(ServerResponse::Error {
-                                        message: "Connection already established".to_string(),
-                                    })
-                                    .await
-                                    .expect("Cannot send");
-                            }
                         }
-                    }
-                    Denied => {
-                        sender
-                            .send(ServerResponse::Error {
-                                message: "Denied".to_string(),
-                            })
-                            .await
-                            .expect("Cannot send");
-                    }
-                    Unknown => {
-                        let server_manager = get_default_server().await;
-                        server_manager
-                            .bounded_channel
-                            .0
-                            .clone()
-                            .send(ServerActivity::SendChallenge {
-                                device_id: cp.device_id.clone(),
-                            })
-                            .await
-                            .expect("Cannot send");
-                    }
-                    _ => match frame {
-                        ServerRequest::InitialRequest { .. } => {}
-                        ServerRequest::ChallengeResponse { .. } => {}
-                        ServerRequest::AcceptConnection(_) => {}
-                        ServerRequest::RejectConnection(_) => {}
-                        _ => {
+                        Denied => {
                             sender
                                 .send(ServerResponse::Error {
-                                    message: "Cannot access resource".to_string(),
+                                    message: "Denied".to_string(),
                                 })
                                 .await
                                 .expect("Cannot send");
                         }
-                    },
+                        Unknown => {
+                            let server_manager = get_default_server().await;
+                            server_manager
+                                .bounded_channel
+                                .0
+                                .clone()
+                                .send(ServerActivity::SendChallenge {
+                                    device_id: dcp.device_id.clone(),
+                                })
+                                .await
+                                .expect("Cannot send");
+                        }
+                        _ => match frame {
+                            ServerRequest::InitialRequest { .. } => {}
+                            ServerRequest::ChallengeResponse { .. } => {}
+                            ServerRequest::AcceptConnection(_) => {}
+                            ServerRequest::RejectConnection(_) => {}
+                            _ => {
+                                sender
+                                    .send(ServerResponse::Error {
+                                        message: "Cannot access resource".to_string(),
+                                    })
+                                    .await
+                                    .expect("Cannot send");
+                            }
+                        },
+                    }
                 }
+                Err(_) => {}
             }
         }
     });
@@ -323,9 +334,15 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError>
         match message {
             ServerActivity::SendChallenge { device_id } => {
                 if let Ok(challenge) = get_serialized_challenge(&device_id).await {
-                    if let Some(connection) = smoke_client_pipe(&device_id).await {
-                        debug!("Sent connection challenge");
-                        send_framed(connection.clone(), challenge).await?;
+                    if let Some(connection) = get_server_peer(&device_id).await {
+                        match send_framed(&connection.connection, challenge).await {
+                            Ok(_) => {
+                                debug!("Sent connection challenge");
+                            }
+                            Err(e) => {
+                                error!("Cannot send challenge request: {}", e.as_ref());
+                            }
+                        }
                     }
                 }
             }
@@ -343,7 +360,7 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError>
 }
 
 async fn send_response_to_client(
-    connection: Arc<Mutex<tokio_rustls::server::TlsStream<TcpStream>>>,
+    connection: &Mutex<tokio_rustls::server::TlsStream<TcpStream>>,
     response: ServerResponse,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let serialized = serde_json::to_vec(&response)?;

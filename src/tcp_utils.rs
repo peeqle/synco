@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::io::{ErrorKind, Write};
 use std::sync::Arc;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -42,7 +43,7 @@ where
 }
 
 pub async fn send_file_chunked<T>(
-    connection: Arc<Mutex<T>>,
+    connection: &Mutex<T>,
     file_entity: &FileEntity,
 ) -> Result<(), CommonThreadError>
 where
@@ -76,7 +77,7 @@ where
     Ok(())
 }
 pub async fn send_framed<T>(
-    connection: Arc<Mutex<T>>,
+    connection: &Mutex<T>,
     request: Vec<u8>,
 ) -> Result<(), CommonThreadError>
 where
@@ -90,7 +91,7 @@ where
     Ok(())
 }
 
-pub async fn receive_frame<T,X>(connection: Arc<Mutex<T>>) -> Result<X, CommonThreadError>
+pub async fn receive_frame<T,X>(connection: &Mutex<T>) -> Result<X, CommonThreadError>
 where
     T: AsyncRead + Unpin + Send + 'static,
     X: DeserializeOwned
@@ -101,6 +102,8 @@ where
     mtx.read_exact(&mut len_bytes).await?;
 
     let len = u64::from_le_bytes(len_bytes) as usize;
+
+    debug!("Received message, len: {}", len);
 
     if len > 10 * 1024 * 1024 {
         return Err(Box::new(io::Error::new(

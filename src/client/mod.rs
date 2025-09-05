@@ -464,13 +464,13 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
 fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<bool>) {
     let challenge_manager = DefaultChallengeManager.clone();
-    let connection_reader = Arc::clone(&peer.connection);
+    let connection_reader = peer.connection.clone();
 
     tokio::spawn(async move {
         loop {
             debug!("HEAR ME OUT");
             tokio::select! {
-                req = receive_frame::<_, ServerResponse>(connection_reader.clone()) => {
+                req = receive_frame::<_, ServerResponse>(connection_reader.as_ref()) => {
                      match req {
                         Ok(request) => {
                             println!("Got request: {:?}", request);
@@ -547,7 +547,7 @@ async fn client_request_listener(
                                 Some(message) => {
                                     let serialized = serde_json::to_vec(&message)
                                         .expect("Cannot serialize");
-                                    send_framed(connection_arc.clone(), serialized)
+                                    send_framed(connection_arc.as_ref(), serialized)
                                         .await
                                         .expect(&format!("Cannot send request to the server: {:?}", message));
                                 }

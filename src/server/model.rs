@@ -110,16 +110,15 @@ pub struct TcpServer {
     pub local_ip: IpAddr,
     pub current_acceptor: Arc<TlsAcceptor>,
     //socket_addr to device_id
-    pub connected_devices: Arc<Mutex<HashMap<String, ServerTcpPeer>>>,
+    pub connected_devices: Arc<Mutex<HashMap<String, Arc<ServerTcpPeer>>>>,
     pub bounded_channel: (Sender<ServerActivity>, Mutex<Receiver<ServerActivity>>),
 }
 
-#[derive(Clone)]
 #[vis(pub)]
 pub struct ServerTcpPeer {
     device_id: String,
-    connection: Arc<Mutex<TlsStream<TcpStream>>>,
-    connection_status: Arc<RwLock<ConnectionState>>
+    connection: Mutex<TlsStream<TcpStream>>,
+    connection_status: RwLock<ConnectionState>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
