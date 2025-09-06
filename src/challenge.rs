@@ -148,7 +148,8 @@ pub async fn run(manager: Arc<ChallengeManager>) {
 pub async fn cleanup() {
     let challenges_arc_clone = Arc::clone(&DefaultChallengeManager);
 
-    let expiration_retainer_fn = |now: Instant, mut collection: RwLockWriteGuard<HashMap<String, DeviceChallengeStatus>>| {
+    let expiration_retainer_fn =
+        |now: Instant, mut collection: RwLockWriteGuard<HashMap<String, DeviceChallengeStatus>>| {
             collection.retain(|device_id, status| {
                 if let Active {
                     ttl, socket_addr, ..
@@ -252,34 +253,19 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
                         }
                     }
                 }
+                //todo add verification if device is already connected - could be mitm fishing attack
                 //incoming
                 ChallengeEvent::NewChallengeRequest { device_id, nonce } => {
                     let device = get_device(&device_id).await;
                     if let Some(_device) = device {
                         let mut mtx = challenge_manager.current_challenges.write().await;
-                        match mtx.entry(device_id.clone()) {
-                            Entry::Occupied(ent) => match ent.get() {
-                                Active { .. } => {}
-                                _ => {
-                                    mtx.insert(
-                                        device_id,
-                                        Pending {
-                                            socket_addr: _device.connect_addr,
-                                            nonce,
-                                        },
-                                    );
-                                }
+                        mtx.insert(
+                            device_id,
+                            Pending {
+                                socket_addr: _device.connect_addr,
+                                nonce,
                             },
-                            Entry::Vacant(_) => {
-                                mtx.insert(
-                                    device_id,
-                                    Pending {
-                                        socket_addr: _device.connect_addr,
-                                        nonce,
-                                    },
-                                );
-                            }
-                        }
+                        );
                     }
                 }
             }
@@ -301,12 +287,13 @@ async fn verify_challenge(
 
     if let Some(challenge) = sent_challenge {
         if let Active {
-                passphrase,
-                nonce_hash,
-                attempts,
-                socket_addr,
-                ..
-            } = challenge {
+            passphrase,
+            nonce_hash,
+            attempts,
+            socket_addr,
+            ..
+        } = challenge
+        {
             let decrypted_hash =
                 decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, &passphrase)
                     .expect("Cannot decrypt");
@@ -353,10 +340,7 @@ pub async fn generate_challenge(
 
     let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
 
-    let mut challenges = default_challenge_manager_arc
-        .challenges
-        .write()
-        .await;
+    let mut challenges = default_challenge_manager_arc.challenges.write().await;
 
     match get_device(device_id).await {
         None => {
