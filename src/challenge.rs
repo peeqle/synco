@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, Mutex, RwLock, RwLockWriteGuard};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
+use crate::consts::data::get_device_id;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -374,7 +375,7 @@ pub async fn generate_challenge(
     }
 
     Ok(ServerResponse::ChallengeRequest {
-        device_id: device_id.clone(),
+        device_id: get_device_id().await,
         nonce: result.0,
     })
 }

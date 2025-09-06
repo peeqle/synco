@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use crate::broadcast::DiscoveredDevice;
 use lazy_static::lazy_static;
 use log::info;
@@ -29,7 +30,7 @@ const MAX_DEAD: u64 = 60 * 5;
 
 impl DeviceManager {
     pub async fn start(&self) {
-        tokio::try_join!(tokio::spawn(cleanup()));
+        tokio::spawn(cleanup());
     }
     pub fn get_known_devices(&self) -> Arc<&RwLock<HashMap<String, DiscoveredDevice>>> {
         Arc::new(&self.known_devices)
@@ -55,14 +56,14 @@ pub async fn add_new_device(device_id: String, socket_addr: SocketAddr) {
         devices.insert(device_id, new_device);
     } else {
         match devices.entry(device_id) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
+            Entry::Occupied(mut entry) => {
                 entry.get_mut().update_last_seen();
                 println!("Device Manager: Updated last seen for device {}", entry.key());
                 // self.device_updates_tx.send(DeviceUpdate::Updated(entry.get().clone())).await.ok();
             }
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            Entry::Vacant(void) => {
                 println!("Device Manager: Discovered new device: {:?}", new_device);
-                entry.insert(new_device.clone());
+                void.insert(new_device.clone());
                 // self.device_updates_tx.send(DeviceUpdate::Added(new_device)).await.ok();
 
             }
@@ -90,10 +91,7 @@ pub async fn cleanup() {
 
 pub async fn get_device(device_id: &String) -> Option<DiscoveredDevice> {
     let device_manager = Arc::new(&DefaultDeviceManager);
-    match device_manager.known_devices.read().await.get(device_id) {
-        None => None,
-        Some(dv) => Some(dv.clone()),
-    }
+    device_manager.known_devices.read().await.get(device_id).cloned()
 }
 
 pub async fn get_device_by_socket(socket_addr: &SocketAddr) -> Option<DiscoveredDevice> {
