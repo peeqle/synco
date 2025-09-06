@@ -9,10 +9,12 @@ use crate::diff::files::{append, get_file, get_file_writer};
 use crate::keychain::node::load::{load_node_cert_der, load_node_key_der, node_cert_exists};
 use crate::keychain::server::load::load_server_signed_ca;
 use crate::server::model::ConnectionState::Unknown;
+use crate::server::model::ServerResponse::FileRequest;
 use crate::server::model::{ConnectionState, ServerRequest, ServerResponse};
-use crate::tcp_utils::{receive_file_chunked, receive_frame, send_framed};
+use crate::tcp_utils::{receive_file_chunked, receive_frame, send_file_chunked, send_framed};
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
+use crate::JoinsChannel;
 use futures::future::err;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
@@ -85,23 +87,6 @@ pub async fn get_client_sender(device_id: &String) -> Option<mpsc::Sender<Server
     None
 }
 
-pub async fn get_client_connection(
-    device_id: &String,
-) -> Option<Arc<Mutex<client::TlsStream<TcpStream>>>> {
-    let cp = DefaultClientManager.clone();
-    let mtx = cp.connections.read().await;
-
-    if let Some(client) = mtx.get(device_id) {
-        let cp = client.connection.clone();
-        let mtx = cp.lock().await;
-
-        if let Some(conn) = mtx.as_ref() {
-            return Some(conn.connection.clone());
-        }
-    }
-    None
-}
-
 #[derive(Clone, Debug)]
 pub struct TcpClient {
     configuration: Arc<ClientConfig>,
@@ -109,7 +94,6 @@ pub struct TcpClient {
 }
 #[derive(Debug)]
 pub struct ClientTcpPeer {
-    pub connection: Arc<Mutex<client::TlsStream<TcpStream>>>,
     pub connection_status: ConnectionState,
     pub request_sender: mpsc::Sender<ServerRequest>,
     pub shutdown_channel: watch::Sender<bool>,
@@ -430,17 +414,14 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         server_id
     );
 
-    let (client_sender, client_receiver) = mpsc::channel(200);
-    let (sh_tx, sh_rx) = watch::channel(false);
+    let (client_sender, mut client_receiver) = mpsc::channel(200);
+    let (sh_tx, mut sh_rx) = watch::channel(false);
 
     let new_peer = ClientTcpPeer {
-        connection: Arc::new(Mutex::new(tls_stream)),
         connection_status: Unknown,
         request_sender: client_sender,
         shutdown_channel: sh_tx,
     };
-
-    server_response_listener(&new_peer, sh_rx.clone());
 
     //Tcp client connection set up
     {
@@ -456,21 +437,40 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     }
 
     //request receiver initialization
-    client_request_listener(&device.device_id, client_receiver, sh_rx).await;
 
-    info!("Connection setup completed for: {}", server_id);
-    Ok(())
-}
-
-fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<bool>) {
-    let challenge_manager = DefaultChallengeManager.clone();
-    let connection_reader = peer.connection.clone();
-
-    tokio::spawn(async move {
+    let (mut read_h, mut write_h) = tokio::io::split(tls_stream);
+    let mut sh_rx_clone = sh_rx.clone();
+    let write_task = tokio::spawn(async move {
         loop {
-            debug!("HEAR ME OUT");
             tokio::select! {
-                req = receive_frame::<_, ServerResponse>(connection_reader.as_ref()) => {
+                message = client_receiver.recv() => {
+                    match message {
+                        Some(message) => {
+                            let serialized = serde_json::to_vec(&message)
+                                .expect("Cannot serialize");
+                            send_framed(&mut write_h, serialized)
+                                .await
+                                .expect(&format!("Cannot send request to the server: {:?}", message));
+                        }
+                        None => {
+                            info!("Channel closed.");
+                            break;
+                        }
+                    }
+                }
+                _ = sh_rx_clone.changed() => {
+                    info!("Channel closed.");
+                    break;
+                }
+            }
+        }
+    });
+
+    let read_task = tokio::spawn(async move {
+        let challenge_manager = DefaultChallengeManager.clone();
+        loop {
+            tokio::select! {
+                req = receive_frame::<_, ServerResponse>(&mut read_h) => {
                      match req {
                         Ok(request) => {
                             println!("Got request: {:?}", request);
@@ -490,18 +490,7 @@ fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<boo
                                 ServerResponse::FileMetadata { file_id, size } => {
                                     if let Some(existing_file) = get_file(&file_id).await {
                                         if let Ok(file_writer) = get_file_writer(&existing_file).await {
-                                            match receive_file_chunked(
-                                                Arc::clone(&connection_reader),
-                                                size,
-                                                file_writer,
-                                            )
-                                            .await
-                                            {
-                                                Ok(_) => {}
-                                                Err(e) => {
-                                                    error!("Cannot receive file {}: {:?}", file_id, e);
-                                                }
-                                            }
+                                            let _ = receive_file_chunked(&mut read_h,size,file_writer).await;
                                         }
                                     }
                                 }
@@ -522,48 +511,10 @@ fn server_response_listener(peer: &ClientTcpPeer, mut sh_rx: watch::Receiver<boo
             }
         }
     });
-}
 
-async fn client_request_listener(
-    server_id: &String,
-    mut client_receiver: Receiver<ServerRequest>,
-    mut sh_rx: watch::Receiver<bool>,
-) {
-    let manager = Arc::clone(&DefaultClientManager);
-    let connections = manager.connections.read().await;
+    JoinsChannel.0.send(write_task)?;
+    JoinsChannel.0.send(read_task)?;
 
-    if let Some(device) = connections.get(server_id).cloned() {
-        let peer_mtx = device.connection.lock().await;
-        if peer_mtx.as_ref().is_none() {
-            error!("Cannot find opened connection for device: {}", server_id);
-        } else if let Some(connector) = peer_mtx.as_ref() {
-            let connection_arc = connector.connection.clone();
-
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                         message = client_receiver.recv() => {
-                            match message {
-                                Some(message) => {
-                                    let serialized = serde_json::to_vec(&message)
-                                        .expect("Cannot serialize");
-                                    send_framed(connection_arc.as_ref(), serialized)
-                                        .await
-                                        .expect(&format!("Cannot send request to the server: {:?}", message));
-                                }
-                                None => {
-                                    info!("Channel closed.");
-                                    break;
-                                }
-                            }
-                        }
-                        _ = sh_rx.changed() => {
-                            info!("Channel closed.");
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-    }
+    info!("Connection setup completed for: {}", server_id);
+    Ok(())
 }

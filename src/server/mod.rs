@@ -1,7 +1,6 @@
 use crate::broadcast::DiscoveredDevice;
 use crate::challenge::DeviceChallengeStatus::Active;
 use crate::challenge::{generate_challenge, ChallengeEvent, DefaultChallengeManager};
-use crate::client::{get_client_connection, get_client_sender};
 use crate::consts::data::get_device_id;
 use crate::consts::{of_type, DEFAULT_SERVER_PORT, DEFAULT_SIGNING_SERVER_PORT};
 use crate::device_manager::{get_device, get_device_by_socket, DefaultDeviceManager};

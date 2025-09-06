@@ -15,7 +15,7 @@ use crate::server::model::ServerResponse::{self, FileMetadata};
 
 pub const FILE_CHUNK_SIZE: usize = 8192;
 pub async fn receive_file_chunked<T, W>(
-    connection: Arc<Mutex<T>>,
+    connection: &mut T,
     size: u64,
     mut writer: W,
 ) -> Result<(), CommonThreadError>
@@ -23,7 +23,6 @@ where
     T: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
-    let mut mtx = connection.lock().await;
     let mut received_bytes: u64 = 0;
     let mut buffer = vec![0u8; FILE_CHUNK_SIZE];
 
@@ -31,7 +30,7 @@ where
         let bytes_to_read = std::cmp::min(FILE_CHUNK_SIZE, (size - received_bytes) as usize);
         buffer.resize(bytes_to_read, 0);
 
-        mtx.read_exact(&mut buffer).await?;
+        connection.read_exact(&mut buffer).await?;
         writer.write_all(&buffer).await?;
 
         received_bytes += bytes_to_read as u64;
