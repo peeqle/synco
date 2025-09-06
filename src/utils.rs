@@ -177,6 +177,7 @@ pub fn encrypt_with_passphrase(
     debug!("CIPHER: {:?}", ciphertext_with_tag);
     debug!("IV: {:?}", iv_bytes);
     debug!("SALT: {:?}", salt);
+    debug!("NONCE: {:?}", nonce_hash);
 
     Ok((ciphertext_with_tag, iv_bytes, salt))
 }
