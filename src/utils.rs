@@ -174,7 +174,7 @@ pub fn encrypt_with_passphrase(
     OsRng.fill_bytes(&mut iv_bytes);
     let nonce = Nonce::from_slice(&iv_bytes);
 
-    let ciphertext_with_tag = cipher.encrypt(nonce, nonce_hash)?;
+    let ciphertext_with_tag = cipher.encrypt(nonce, passphrase)?;
     Ok((ciphertext_with_tag, iv_bytes, salt))
 }
 

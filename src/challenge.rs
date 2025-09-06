@@ -1,6 +1,7 @@
 use crate::challenge::DeviceChallengeStatus::{Closed, Pending};
 use crate::client::ClientActivity::{ChangeStatus, OpenConnection};
 use crate::client::DefaultClientManager;
+use crate::consts::data::get_device_id;
 use crate::consts::{CommonThreadError, CHALLENGE_DEATH};
 use crate::device_manager::get_device;
 use crate::server::model::ConnectionState::{Access, Denied};
@@ -8,7 +9,7 @@ use crate::server::model::ServerResponse;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
 use lazy_static::lazy_static;
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::de;
 use std::collections::hash_map::Entry;
 use std::collections::{self, HashMap};
@@ -24,7 +25,6 @@ use tokio::sync::{mpsc, Mutex, RwLock, RwLockWriteGuard};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
-use crate::consts::data::get_device_id;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -295,11 +295,17 @@ async fn verify_challenge(
             ..
         } = challenge
         {
-            let decrypted_hash =
+            //todo think more, but ok for most cases
+            let decrypted_hash = if let Ok(res) =
                 decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, &passphrase)
-                    .expect("Cannot decrypt");
+            {
+                res
+            } else {
+                vec![]
+            };
 
-            if !decrypted_hash.eq(nonce_hash) {
+            return if !decrypted_hash.eq(nonce_hash) {
+                info!("Client passphrase invalid");
                 *attempts -= 1;
 
                 if *attempts == 0u8 {
@@ -315,13 +321,13 @@ async fn verify_challenge(
                     return Ok((false, true));
                 }
 
-                return Ok((false, false));
+                Ok((false, false))
             } else {
                 let mut challenges = challenge_manager.challenges.write().await;
                 challenges.remove_entry(device_id);
 
-                return Ok((true, false));
-            }
+                Ok((true, false))
+            };
         }
     }
 

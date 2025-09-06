@@ -424,7 +424,7 @@ impl Step for CompleteChallenge {
                                     read_user_input().expect("Cannot read provided bytes");
 
                                 let (ciphertext_with_tag, iv_bytes, salt) =
-                                    encrypt_with_passphrase(&*nonce, passphrase.as_bytes())
+                                    encrypt_with_passphrase(&nonce, passphrase.as_bytes())
                                         .expect("Cannot encrypt");
 
                                 let futures = spawn_blocking(move || {
