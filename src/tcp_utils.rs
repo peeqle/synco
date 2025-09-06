@@ -1,10 +1,10 @@
+use log::debug;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{self, Read};
 use std::io::{ErrorKind, Write};
 use std::sync::Arc;
-use log::debug;
-use serde::{Deserialize, Serialize};
-use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -17,7 +17,7 @@ pub const FILE_CHUNK_SIZE: usize = 8192;
 pub async fn receive_file_chunked<T, W>(
     connection: Arc<Mutex<T>>,
     size: u64,
-    mut writer: W
+    mut writer: W,
 ) -> Result<(), CommonThreadError>
 where
     T: AsyncRead + Unpin + Send + 'static,
@@ -43,7 +43,7 @@ where
 }
 
 pub async fn send_file_chunked<T>(
-    connection: &Mutex<T>,
+    connection: &mut T,
     file_entity: &FileEntity,
 ) -> Result<(), CommonThreadError>
 where
@@ -57,10 +57,10 @@ where
 
     let serialized_metadata = serde_json::to_vec(&metadata)?;
 
-    let mut mtx = connection.lock().await;
-    mtx.write_all(&(serialized_metadata.len() as u64).to_le_bytes())
+    connection
+        .write_all(&(serialized_metadata.len() as u64).to_le_bytes())
         .await?;
-    mtx.write_all(&serialized_metadata).await?;
+    connection.write_all(&serialized_metadata).await?;
 
     let mut buffer_chunk = [0u8; FILE_CHUNK_SIZE];
 
@@ -70,36 +70,34 @@ where
             break;
         }
 
-        mtx.write_all(&(bytes_read as u64).to_le_bytes()).await?;
-        mtx.write_all(&buffer_chunk[..bytes_read]).await?;
+        connection
+            .write_all(&(bytes_read as u64).to_le_bytes())
+            .await?;
+        connection.write_all(&buffer_chunk[..bytes_read]).await?;
     }
-
+    connection.flush().await?;
     Ok(())
 }
-pub async fn send_framed<T>(
-    connection: &Mutex<T>,
-    request: Vec<u8>,
-) -> Result<(), CommonThreadError>
+pub async fn send_framed<T>(connection: &mut T, request: Vec<u8>) -> Result<(), CommonThreadError>
 where
     T: AsyncWrite + Unpin + Send + 'static,
 {
-    let mut mtx = connection.lock().await;
+    connection
+        .write_all(&(request.len() as u64).to_le_bytes())
+        .await?;
+    connection.write_all(&request).await?;
 
-    mtx.write_all(&(request.len() as u64).to_le_bytes()).await?;
-    mtx.write_all(&request).await?;
-
+    connection.flush().await?;
     Ok(())
 }
 
-pub async fn receive_frame<T,X>(connection: &Mutex<T>) -> Result<X, CommonThreadError>
+pub async fn receive_frame<T, X>(connection: &mut T) -> Result<X, CommonThreadError>
 where
     T: AsyncRead + Unpin + Send + 'static,
-    X: DeserializeOwned
+    X: DeserializeOwned,
 {
-    let mut mtx = connection.lock().await;
-
     let mut len_bytes = [0u8; 8];
-    mtx.read_exact(&mut len_bytes).await?;
+    connection.read_exact(&mut len_bytes).await?;
 
     let len = u64::from_le_bytes(len_bytes) as usize;
 
@@ -113,7 +111,7 @@ where
     }
 
     let mut buffer = vec![0u8; len];
-    mtx.read_exact(&mut buffer).await?;
+    connection.read_exact(&mut buffer).await?;
 
     let req = serde_json::from_slice::<X>(&buffer)?;
 

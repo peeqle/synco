@@ -117,7 +117,7 @@ pub struct TcpServer {
 #[vis(pub)]
 pub struct ServerTcpPeer {
     device_id: String,
-    connection: Mutex<TlsStream<TcpStream>>,
+    response_sender: Sender<ServerResponse>,
     connection_status: RwLock<ConnectionState>
 }
 
@@ -176,6 +176,10 @@ pub enum ServerResponse {
     },
     Error {
         message: String,
+    },
+    //bad arch do not use to send
+    FileRequest {
+        file_id: String
     },
 }
 
