@@ -338,12 +338,8 @@ impl Step for ListChallenges {
                 match ch {
                     DeviceChallengeStatus::Active {
                         socket_addr,
-                        nonce,
-                        nonce_hash,
-                        salt,
-                        passphrase,
                         attempts,
-                        ttl,
+                        ..
                     } => {
                         println!(
                             "{}\t|\t\t{}\t\t{}\t\t{}\t\t{}",

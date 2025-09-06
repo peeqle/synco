@@ -65,9 +65,7 @@ pub enum DeviceChallengeStatus {
     //outcoming
     Active {
         socket_addr: SocketAddr,
-        nonce: Vec<u8>,
         nonce_hash: Vec<u8>,
-        salt: Vec<u8>,
         passphrase: Vec<u8>,
         attempts: u8,
         ttl: Instant,
@@ -98,13 +96,9 @@ impl ConnectionStatusVerification for DeviceChallengeStatus {
         let now = Instant::now();
         match self {
             Active {
-                socket_addr,
-                nonce,
-                nonce_hash,
-                salt,
-                passphrase,
                 attempts,
                 ttl,
+                ..
             } => {
                 if now.ge(ttl) {
                     return Ok(false);
@@ -342,12 +336,11 @@ pub async fn generate_challenge(
     device_id: &String,
 ) -> Result<ServerResponse, Box<dyn Error + Send + Sync>> {
     debug!("Generating a challenge for: {}", device_id);
-    let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
-    let result = encrypt_with_passphrase(nonce_uuid_hash.as_bytes(), b"key").unwrap();
 
     let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
-
     let mut challenges = default_challenge_manager_arc.challenges.write().await;
+
+    let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
 
     match get_device(device_id).await {
         None => {
@@ -362,8 +355,6 @@ pub async fn generate_challenge(
                     device_id.clone(),
                     Active {
                         socket_addr: device.connect_addr,
-                        nonce: result.1.into(),
-                        salt: result.2.into(),
                         nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
                         passphrase: blake3::hash(b"key").as_bytes().to_vec(),
                         attempts: 3,
@@ -382,6 +373,6 @@ pub async fn generate_challenge(
 
     Ok(ServerResponse::ChallengeRequest {
         device_id: get_device_id().await,
-        nonce: result.0,
+        nonce: nonce_uuid_hash.as_bytes().to_vec(),
     })
 }
