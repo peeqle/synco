@@ -8,6 +8,7 @@ use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
 use base32::Alphabet;
+use log::debug;
 use pbkdf2::pbkdf2_hmac;
 use rustls::RootCertStore;
 use sha2::Sha256;
@@ -173,6 +174,10 @@ pub fn encrypt_with_passphrase(
     let nonce = Nonce::from_slice(&iv_bytes);
 
     let ciphertext_with_tag = cipher.encrypt(nonce, passphrase)?;
+    debug!("CIPHER: {:?}", ciphertext_with_tag);
+    debug!("IV: {:?}", iv_bytes);
+    debug!("SALT: {:?}", salt);
+
     Ok((ciphertext_with_tag, iv_bytes, salt))
 }
 
