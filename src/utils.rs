@@ -2,7 +2,6 @@ use crate::consts::{
     DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR,
     DEFAULT_SERVER_CERT_STORAGE,
 };
-use crate::get_handle;
 use crate::keychain::data::get_signing_key;
 use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
@@ -18,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 use tokio::sync::Mutex;
-use tokio::task::spawn_blocking;
 
 pub mod control {
     use std::error::Error;
@@ -166,7 +164,7 @@ pub fn encrypt_with_passphrase(
     OsRng.fill_bytes(&mut salt);
 
     let mut key_bytes = [0u8; 16];
-    pbkdf2_hmac::<Sha256>(passphrase, &salt, 100_000, &mut key_bytes);
+    pbkdf2_hmac::<Sha256>(nonce_hash, &salt, 100_000, &mut key_bytes);
 
     let cipher = Aes128Gcm::new_from_slice(&key_bytes).map_err(|_| aes_gcm::Error)?;
 
@@ -180,18 +178,17 @@ pub fn encrypt_with_passphrase(
 
 pub fn decrypt_with_passphrase(
     ciphertext_with_tag: &[u8],
-    nonce_bytes: &[u8; 12],
+    iv_bytes: &[u8; 12],
     salt_bytes: &[u8; 16],
-    passphrase: &[u8],
+    nonce_hash: &[u8],
 ) -> Result<Vec<u8>, aes_gcm::Error> {
     let mut key_bytes = [0u8; 16];
-    pbkdf2_hmac::<Sha256>(passphrase, salt_bytes, 100_000, &mut key_bytes);
+    pbkdf2_hmac::<Sha256>(nonce_hash, salt_bytes, 100_000, &mut key_bytes);
 
     let cipher = Aes128Gcm::new_from_slice(&key_bytes).map_err(|_| aes_gcm::Error)?;
+    let nonce = Nonce::from_slice(iv_bytes);
 
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ciphertext_with_tag.as_ref())?;
-
+    let plaintext = cipher.decrypt(nonce, ciphertext_with_tag)?;
     Ok(plaintext)
 }
 
@@ -205,20 +202,12 @@ mod test {
         let nonce_hash = blake3::hash(uuid.as_bytes());
         let passphrase = "Hello, World!";
 
-        let data_to_encrypt = nonce_hash.as_bytes();
-
-        let enc_response = encrypt_with_passphrase(data_to_encrypt, &passphrase.as_bytes())
+        let enc = encrypt_with_passphrase(nonce_hash.as_bytes(), passphrase.as_bytes())
             .expect("Cannot encrypt");
 
-        let decr_response = decrypt_with_passphrase(
-            &enc_response.0,
-            &enc_response.1,
-            &enc_response.2,
-            passphrase.as_bytes(),
-        )
-        .expect("Cannot decrypt");
+        let decr = decrypt_with_passphrase(&enc.0, &enc.1, &enc.2, nonce_hash.as_bytes())
+            .expect("Cannot decrypt");
 
-        println!("Decrypted data: {:?}", decr_response);
-        assert_eq!(decr_response.as_slice(), data_to_encrypt);
+        assert_eq!(decr.as_slice(), passphrase.as_bytes());
     }
 }
