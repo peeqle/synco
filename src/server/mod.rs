@@ -252,23 +252,6 @@ async fn consume_frame(
     match current_status {
         Access => {
             match frame {
-                ServerRequest::ChallengeResponse {
-                    iv_bytes,
-                    salt,
-                    ciphertext_with_tag,
-                } => {
-                    let challenge_manager = DefaultChallengeManager.clone();
-                    challenge_manager
-                        .get_sender()
-                        .send(ChallengeEvent::ChallengeVerification {
-                            device_id,
-                            iv_bytes,
-                            salt,
-                            ciphertext_with_tag,
-                        })
-                        .await
-                        .expect("Cannot send");
-                }
                 ServerRequest::RejectConnection(_) => {
                     //todo
                 }
@@ -299,16 +282,35 @@ async fn consume_frame(
                 .await
                 .expect("Cannot send");
         }
-        Unknown => {
-            let server_manager = get_default_server().await;
-            server_manager
-                .bounded_channel
-                .0
-                .clone()
-                .send(ServerActivity::SendChallenge { device_id })
-                .await
-                .expect("Cannot send");
-        }
+        Unknown => match frame {
+            ServerRequest::ChallengeResponse {
+                iv_bytes,
+                salt,
+                ciphertext_with_tag,
+            } => {
+                let challenge_manager = DefaultChallengeManager.clone();
+                challenge_manager
+                    .get_sender()
+                    .send(ChallengeEvent::ChallengeVerification {
+                        device_id,
+                        iv_bytes,
+                        salt,
+                        ciphertext_with_tag,
+                    })
+                    .await
+                    .expect("Cannot send");
+            }
+            _ => {
+                let server_manager = get_default_server().await;
+                server_manager
+                    .bounded_channel
+                    .0
+                    .clone()
+                    .send(ServerActivity::SendChallenge { device_id })
+                    .await
+                    .expect("Cannot send");
+            }
+        },
         _ => match frame {
             ServerRequest::InitialRequest { .. } => {}
             ServerRequest::ChallengeResponse { .. } => {}
@@ -337,8 +339,7 @@ async fn listen_actions(server: Arc<TcpServer>) -> Result<(), CommonThreadError>
             ServerActivity::SendChallenge { device_id } => {
                 let challenge_query = generate_challenge(&device_id).await?;
                 if let Some(connection) = get_server_peer(&device_id).await {
-                    connection.response_sender.send(challenge_query)
-                        .await?;
+                    connection.response_sender.send(challenge_query).await?;
                 }
             }
             ServerActivity::VerifiedChallenge { device_id } => {

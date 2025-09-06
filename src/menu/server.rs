@@ -11,10 +11,9 @@ use crate::server::data::get_default_server;
 use crate::server::model::ServerRequest;
 use crate::utils::encrypt_with_passphrase;
 use crate::{broadcast, challenge, client, get_handle, menu_step, server, JoinsChannel};
-use futures::executor::block_on;
-use futures::future;
+use ::futures::executor;
 use lazy_static::lazy_static;
-use log::info;
+use log::{error, info};
 use std::collections::{HashMap, LinkedList};
 use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
@@ -22,6 +21,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use tokio::sync::oneshot::{self, channel};
 use tokio::task;
+use tokio::task::spawn_blocking;
 
 //todo future me create logic for handling runner state
 // from the handlers to menu components state via global ?state machine?
@@ -250,7 +250,7 @@ impl Step for ListKnownDevices {
                 mtx.clone()
             })
         });
-        let devices = block_on(devices_future).expect("");
+        let devices = futures::executor::block_on(devices_future).expect("");
 
         println!("\n--- Known Devices ({} total) ---", devices.len());
         for (id, device) in devices.iter() {
@@ -286,11 +286,13 @@ impl Step for ListChallenges {
         let future = get_handle().spawn_blocking(move || {
             get_handle().block_on(async {
                 let challenge_manager = Arc::clone(&DefaultChallengeManager);
-                (challenge_manager.current_challenges.read().await.clone(), challenge_manager.challenges.read().await.clone())
+                (
+                    challenge_manager.current_challenges.read().await.clone(),
+                    challenge_manager.challenges.read().await.clone(),
+                )
             })
         });
-        let (current_challenges, challeneges)
-            = block_on(future).expect("Cannot block");
+        let (current_challenges, challeneges) = futures::executor::block_on(future).expect("Cannot block");
 
         if current_challenges.is_empty() {
             println!("----------------------------------");
@@ -403,8 +405,7 @@ impl Step for CompleteChallenge {
             })
         });
 
-        let challenges = block_on(futures).expect("");
-
+        let challenges = futures::executor::block_on(futures).expect("");
 
         if !challenges.is_empty() {
             println!("Select option:");
@@ -426,19 +427,25 @@ impl Step for CompleteChallenge {
                                     encrypt_with_passphrase(&*nonce, passphrase.as_bytes())
                                         .expect("Cannot encrypt");
 
-                                get_handle().spawn_blocking(async move || {
-                                    if let Some(_sender) = get_client_sender(&device_id).await {
-                                        _sender
-                                            .send(ServerRequest::ChallengeResponse {
-                                                iv_bytes,
-                                                salt,
-                                                ciphertext_with_tag,
-                                            })
-                                            .await
-                                            .expect("Cannot send passphrase verification");
-                                    }
-                                    //todo make connection rollback if not persist
+                                let futures = spawn_blocking(move || {
+                                    get_handle().block_on(async {
+                                        if let Some(_sender) = get_client_sender(&device_id).await {
+                                            _sender
+                                                .send(ServerRequest::ChallengeResponse {
+                                                    iv_bytes,
+                                                    salt,
+                                                    ciphertext_with_tag,
+                                                })
+                                                .await
+                                                .expect("Cannot send passphrase verification");
+                                        } else {
+                                            error!("Cannot send solution to the server");
+                                        }
+                                        //todo make connection rollback if not persist
+                                    })
                                 });
+
+                                futures::executor::block_on(futures).expect("Cannot finish task");
                             }
                             _ => {
                                 println!("Cannot activate that channel");
