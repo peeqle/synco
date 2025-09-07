@@ -73,9 +73,6 @@ where
         }
 
         debug!("Sending file bytes");
-        connection
-            .write_all(&(bytes_read as u64).to_le_bytes())
-            .await?;
         connection.write_all(&buffer_chunk[..bytes_read]).await?;
     }
     connection.flush().await?;
