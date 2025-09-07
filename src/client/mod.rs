@@ -219,45 +219,43 @@ pub async fn try_connect() {
 }
 
 pub async fn run(_manager: Arc<ClientManager>) {
-    let handle_fn = async |x: ClientActivity| match x {
-        ClientActivity::OpenConnection { device_id } => {
-            let empty = {
-                let cp = Arc::clone(&DefaultClientManager);
-                !cp.connections.read().await.contains_key(&device_id)
-            };
+    let mut receiver = _manager.bounded_channel.1.lock().await;
+    while let Some(message) = receiver.recv().await {
+        match message {
+            ClientActivity::OpenConnection { device_id } => {
+                let empty = {
+                    let cp = Arc::clone(&DefaultClientManager);
+                    !cp.connections.read().await.contains_key(&device_id)
+                };
 
-            if empty {
-                create_client(device_id).await;
-            } else {
-                info!("Connection already exists for device: {}", device_id);
+                if empty {
+                    create_client(device_id).await;
+                } else {
+                    info!("Connection already exists for device: {}", device_id);
+                }
             }
-        }
-        ClientActivity::ChangeStatus { device_id, status } => {
-            let cp = Arc::clone(&DefaultClientManager);
-            let mut mtx = cp.connections.write().await;
-
-            if let Some(_device) = mtx.get_mut(&device_id) {
-                _device.update_client_status(status.clone());
-                info!("Opened connection for: {}", device_id);
-
+            ClientActivity::ChangeStatus { device_id, status } => {
                 let cp = get_default_server().await.connected_devices.clone();
                 let mtx = cp.lock().await;
 
                 if let Some(client) = mtx.get(&device_id) {
-                    client.response_sender.clone()
+                    {
+                        let mut mtx = client.connection_status.write().await;
+                        *mtx = status.clone();
+                    }
+
+                    client
+                        .response_sender
+                        .clone()
                         .send(ConnectionStateNotification(status.clone()))
-                        .await.expect("Cannot send response");
+                        .await
+                        .expect("Cannot send response");
                 }
             }
         }
-    };
-    loop {
-        let mut receiver = _manager.bounded_channel.1.lock().await;
-        tokio::select! {
-                 Some(message) = receiver.recv() => handle_fn(message).await
-        }
     }
 }
+
 pub async fn create_client(device_id: String) {
     let device_manager = Arc::clone(&DefaultDeviceManager);
     if let Some(device) = device_manager.known_devices.read().await.get(&device_id) {

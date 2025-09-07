@@ -38,9 +38,9 @@ lazy_static! {
 pub struct ChallengeManager {
     //device_id -> _, nonce hash, ttl
     //incoming challenges
-    pub current_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
+    pub in_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
     //only active challenges for devices
-    pub(crate) challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
+    pub(crate) out_challenges: RwLock<HashMap<String, DeviceChallengeStatus>>,
     //receiver for emitted connection event
     bounded_channel: (Sender<ChallengeEvent>, Mutex<Receiver<ChallengeEvent>>),
 }
@@ -119,8 +119,8 @@ impl ChallengeManager {
         bounded_channel: (Sender<ChallengeEvent>, Mutex<Receiver<ChallengeEvent>>),
     ) -> ChallengeManager {
         ChallengeManager {
-            current_challenges: RwLock::new(HashMap::new()),
-            challenges: RwLock::new(HashMap::new()),
+            in_challenges: RwLock::new(HashMap::new()),
+            out_challenges: RwLock::new(HashMap::new()),
             bounded_channel,
         }
     }
@@ -130,13 +130,13 @@ impl ChallengeManager {
     }
 
     pub async fn remove_incoming_challenge(&self, device_id: &String) {
-        let mut challenges = self.current_challenges.write().await;
+        let mut challenges = self.in_challenges.write().await;
         challenges.remove_entry(device_id);
         debug!("Removed challenge: {}", device_id);
     }
 
     pub async fn can_request_new_connection(&self, device_id: &String) -> bool {
-        let challenges = self.challenges.read().await;
+        let challenges = self.out_challenges.read().await;
         !challenges.contains_key(device_id)
     }
 }
@@ -180,9 +180,10 @@ pub async fn cleanup() {
         };
     loop {
         let now = Instant::now();
-
-        expiration_retainer_fn(now, challenges_arc_clone.current_challenges.write().await);
-        expiration_retainer_fn(now, challenges_arc_clone.challenges.write().await);
+        {
+            expiration_retainer_fn(now, challenges_arc_clone.in_challenges.write().await);
+            expiration_retainer_fn(now, challenges_arc_clone.out_challenges.write().await);
+        }
 
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
@@ -260,7 +261,7 @@ pub async fn challenge_listener(manager: Arc<ChallengeManager>) -> Result<(), Co
                 ChallengeEvent::NewChallengeRequest { device_id, nonce } => {
                     let device = get_device(&device_id).await;
                     if let Some(_device) = device {
-                        let mut mtx = challenge_manager.current_challenges.write().await;
+                        let mut mtx = challenge_manager.in_challenges.write().await;
                         mtx.insert(
                             device_id,
                             Pending {
@@ -284,7 +285,7 @@ async fn verify_challenge(
 ) -> Result<(bool, bool), CommonThreadError> {
     let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
-    let mut challenges = challenge_manager.challenges.write().await;
+    let mut challenges = challenge_manager.out_challenges.write().await;
     let sent_challenge = challenges.get_mut(device_id);
 
     if let Some(challenge) = sent_challenge {
@@ -302,7 +303,7 @@ async fn verify_challenge(
                 *attempts -= 1;
 
                 if *attempts == 0u8 {
-                    let mut challenges = challenge_manager.challenges.write().await;
+                    let mut challenges = challenge_manager.out_challenges.write().await;
                     challenges.remove_entry(device_id);
 
                     challenges.insert(
@@ -322,8 +323,8 @@ async fn verify_challenge(
                     return if !decrypted_hash.eq(nonce_hash) {
                         error_func().await
                     } else {
-                        let mut challenges = challenge_manager.challenges.write().await;
-                        challenges.remove_entry(device_id);
+                        // let mut challenges = challenge_manager.out_challenges.write().await;
+                        // challenges.remove_entry(device_id);
 
                         Ok((true, false))
                     };
@@ -346,10 +347,10 @@ async fn verify_challenge(
 pub async fn generate_challenge(
     device_id: &String,
 ) -> Result<ServerResponse, Box<dyn Error + Send + Sync>> {
-    debug!("Generating a challenge for: {}", device_id);
+    debug!("Generating challenge for: {}", device_id);
 
     let default_challenge_manager_arc = Arc::clone(&DefaultChallengeManager);
-    let mut challenges = default_challenge_manager_arc.challenges.write().await;
+    let mut challenges = default_challenge_manager_arc.out_challenges.write().await;
 
     let nonce_uuid_hash = blake3::hash(Uuid::new_v4().as_bytes());
 

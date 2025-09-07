@@ -287,8 +287,8 @@ impl Step for ListChallenges {
             get_handle().block_on(async {
                 let challenge_manager = Arc::clone(&DefaultChallengeManager);
                 (
-                    challenge_manager.current_challenges.read().await.clone(),
-                    challenge_manager.challenges.read().await.clone(),
+                    challenge_manager.in_challenges.read().await.clone(),
+                    challenge_manager.out_challenges.read().await.clone(),
                 )
             })
         });
@@ -394,7 +394,7 @@ impl Step for CompleteChallenge {
             get_handle().block_on(async {
                 let challenges = {
                     let challenge_manager = Arc::clone(&DefaultChallengeManager);
-                    challenge_manager.current_challenges.read().await.clone()
+                    challenge_manager.in_challenges.read().await.clone()
                 };
 
                 challenges

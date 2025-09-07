@@ -98,9 +98,6 @@ pub mod files {
     pub async fn append(file_dto: FileEntityDto) {
         match get_file(&file_dto.id).await {
             None => {
-                warn!("File already exists: {}", &file_dto.id);
-            }
-            Some(_) => {
                 Files
                     .with_lock(move |collection| {
                         if let Some(cooked_file) = from_dto(file_dto) {
@@ -108,6 +105,9 @@ pub mod files {
                         }
                     })
                     .await;
+            }
+            Some(_) => {
+                warn!("File already exists: {}", &file_dto.id);
             }
         };
     }
@@ -130,32 +130,32 @@ pub mod files {
         let mut mtx = cp.lock().await;
 
         let device_id = get_device_id().await;
-        if let None  =mtx.iter_mut()
-            .find(|file| file.main_node_id == device_id && file.path.eq(path.as_ref())) {
+        if let None = mtx
+            .iter_mut()
+            .find(|file| file.main_node_id == device_id && file.path.eq(path.as_ref()))
+        {
             let hash = blake_digest(path.as_ref())?;
 
-            mtx.push(
-                FileEntity {
-                    id: Uuid::new_v4().to_string(),
-                    filename: String::from(
-                        PathBuf::from(path.as_ref())
-                            .file_name()
-                            .unwrap()
-                            .to_str()
-                            .unwrap(),
-                    ),
-                    size: metadata.len(),
-                    path: PathBuf::from(path.as_ref()),
-                    is_in_sync: false,
-                    snapshot_path: None,
-                    prev_hash: None,
-                    current_hash: hash,
-                    main_node_id: get_device_id().await,
-                    synced_with: vec![],
-                    notify: Arc::new(Notify::new()),
-                },
-            );
-        }else {
+            mtx.push(FileEntity {
+                id: Uuid::new_v4().to_string(),
+                filename: String::from(
+                    PathBuf::from(path.as_ref())
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                ),
+                size: metadata.len(),
+                path: PathBuf::from(path.as_ref()),
+                is_in_sync: false,
+                snapshot_path: None,
+                prev_hash: None,
+                current_hash: hash,
+                main_node_id: get_device_id().await,
+                synced_with: vec![],
+                notify: Arc::new(Notify::new()),
+            });
+        } else {
             info!("File exists");
         }
 
