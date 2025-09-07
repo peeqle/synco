@@ -200,7 +200,6 @@ pub fn decrypt_with_passphrase(
 
 mod test {
     use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
-    use aes_gcm::aes::cipher;
     use uuid::Uuid;
 
     #[test]
@@ -209,26 +208,11 @@ mod test {
         let nonce_hash = blake3::hash(uuid.as_bytes());
         let passphrase = "Hello, World!";
 
-        let ciph:Vec<u8> = vec![
-            169, 3, 43, 09, 49, 27, 36, 44, 35, 6, 206, 175, 83, 226, 183, 223, 65, 168, 130, 211,
-            72, 207, 128, 93, 214, 122, 208, 176, 194, 55, 232, 115, 146, 52, 128, 161, 90, 54, 45,
-            216, 19, 132, 92, 129, 21, 2, 234, 6,
-        ];
+        let (ciph, iv, salt) =
+            encrypt_with_passphrase(nonce_hash.as_bytes(), passphrase.as_bytes())
+                .expect("Cannot encrypt");
 
-        let iv:Vec<u8> = vec![29, 116, 29, 3, 255, 132, 55, 130, 207, 145, 122, 242];
-        let salt:Vec<u8> = vec![
-            191, 47, 196, 60, 51, 63, 215, 237, 178, 82, 229, 95, 64, 181, 237, 100,
-        ];
-
-        let pass:Vec<u8> = vec![
-            255, 142, 43, 171, 59, 38, 224, 193, 39, 0, 33, 39, 144, 85, 57, 180, 126, 180, 33,
-            222, 133, 213, 84, 225, 95, 85, 164, 70, 69, 155, 82, 180,
-        ];
-        // let enc = encrypt_with_passphrase(nonce_hash.as_bytes(), passphrase.as_bytes())
-        //     .expect("Cannot encrypt");
-
-        let decr = decrypt_with_passphrase(&ciph, <&[u8; 12]>::try_from(&iv[..12]).unwrap(),
-                                           <&[u8; 16]>::try_from(&salt[..16]).unwrap(), &pass)
+        let decr = decrypt_with_passphrase(&ciph, &iv, &salt, passphrase.as_bytes())
             .expect("Cannot decrypt");
 
         assert_eq!(decr.as_slice(), nonce_hash.as_bytes());

@@ -8,8 +8,9 @@ use crate::device_manager::DefaultDeviceManager;
 use crate::diff::files::{append, get_file, get_file_writer};
 use crate::keychain::node::load::{load_node_cert_der, load_node_key_der, node_cert_exists};
 use crate::keychain::server::load::load_server_signed_ca;
+use crate::server::data::get_default_server;
 use crate::server::model::ConnectionState::Unknown;
-use crate::server::model::ServerResponse::FileRequest;
+use crate::server::model::ServerResponse::{ConnectionStateNotification, FileRequest};
 use crate::server::model::{ConnectionState, ServerRequest, ServerResponse};
 use crate::tcp_utils::{receive_file_chunked, receive_frame, send_file_chunked, send_framed};
 use crate::utils::DirType::Action;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::ops::DerefMut;
+use std::os::linux::raw::stat;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -235,8 +237,17 @@ pub async fn run(_manager: Arc<ClientManager>) {
             let mut mtx = cp.connections.write().await;
 
             if let Some(_device) = mtx.get_mut(&device_id) {
-                _device.update_client_status(status);
+                _device.update_client_status(status.clone());
                 info!("Opened connection for: {}", device_id);
+
+                let cp = get_default_server().await.connected_devices.clone();
+                let mtx = cp.lock().await;
+
+                if let Some(client) = mtx.get(&device_id) {
+                    client.response_sender.clone()
+                        .send(ConnectionStateNotification(status.clone()))
+                        .await.expect("Cannot send response");
+                }
             }
         }
     };
@@ -465,7 +476,7 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
             }
         }
     });
-
+    let device_id = device.device_id.clone();
     let read_task = tokio::spawn(async move {
         let challenge_manager = DefaultChallengeManager.clone();
         loop {
@@ -475,10 +486,10 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
                         Ok(request) => {
                             println!("Got request: {:?}", request);
                             match request {
-                                ServerResponse::ChallengeRequest { device_id, nonce } => {
+                                ServerResponse::ChallengeRequest { nonce } => {
                                     challenge_manager
                                         .get_sender()
-                                        .send(NewChallengeRequest { device_id, nonce })
+                                        .send(NewChallengeRequest { device_id: device_id.clone(), nonce })
                                         .await
                                         .expect("Cannot send");
                                 }
@@ -494,7 +505,14 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
                                         }
                                     }
                                 }
-                                ServerResponse::Error { .. } => {}
+                                ServerResponse::ConnectionStateNotification(state) => {
+                                    info!("Connection update on server, state: {:?}", state);
+                                    let cp = DefaultChallengeManager.clone();
+                                    cp.remove_incoming_challenge(&device_id).await;
+                                }
+                                ServerResponse::Error {message  } => {
+                                    error!("Server returned error: {}", message)
+                                }
                                 _ => {}
                             }
                         }

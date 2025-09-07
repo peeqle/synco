@@ -9,7 +9,7 @@ use crate::server::model::ServerResponse;
 use crate::utils::control::ConnectionStatusVerification;
 use crate::utils::{decrypt_with_passphrase, encrypt_with_passphrase};
 use lazy_static::lazy_static;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use serde::de;
 use std::collections::hash_map::Entry;
 use std::collections::{self, HashMap};
@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, Mutex, RwLock, RwLockWriteGuard};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use DeviceChallengeStatus::Active;
+use crate::keychain::data::get_device_passphrase;
 
 lazy_static! {
     pub static ref DefaultChallengeManager: Arc<ChallengeManager> = {
@@ -126,6 +127,12 @@ impl ChallengeManager {
 
     pub fn get_sender(&self) -> Sender<ChallengeEvent> {
         self.bounded_channel.0.clone()
+    }
+
+    pub async fn remove_incoming_challenge(&self, device_id: &String) {
+        let mut challenges = self.current_challenges.write().await;
+        challenges.remove_entry(device_id);
+        debug!("Removed challenge: {}", device_id);
     }
 
     pub async fn can_request_new_connection(&self, device_id: &String) -> bool {
@@ -289,16 +296,8 @@ async fn verify_challenge(
             ..
         } = challenge
         {
-            //todo think more, but ok for most cases
-            let decrypted_hash:Vec<u8> = if let Ok(res) =
-                decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, passphrase)
-            {
-                res
-            } else {
-                vec![]
-            };
 
-            return if !decrypted_hash.eq(nonce_hash) {
+            let mut error_func = async || {
                 info!("Client passphrase invalid");
                 *attempts -= 1;
 
@@ -316,12 +315,24 @@ async fn verify_challenge(
                 }
 
                 Ok((false, false))
-            } else {
-                let mut challenges = challenge_manager.challenges.write().await;
-                challenges.remove_entry(device_id);
-
-                Ok((true, false))
             };
+
+            return match decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, passphrase) {
+                Ok(decrypted_hash) => {
+                    return if !decrypted_hash.eq(nonce_hash) {
+                        error_func().await
+                    } else {
+                        let mut challenges = challenge_manager.challenges.write().await;
+                        challenges.remove_entry(device_id);
+
+                        Ok((true, false))
+                    };
+                }
+                Err(e) => {
+                    error!("Error during client passphrase decryption: {}", e);
+                    error_func().await
+                }
+            }
         }
     }
 
@@ -356,7 +367,7 @@ pub async fn generate_challenge(
                     Active {
                         socket_addr: device.connect_addr,
                         nonce_hash: nonce_uuid_hash.as_bytes().to_vec(),
-                        passphrase: blake3::hash(b"key").as_bytes().to_vec(),
+                        passphrase: get_device_passphrase().await,
                         attempts: 3,
                         ttl: Instant::now().add(Duration::from_secs(60 * 5)),
                     },
@@ -372,7 +383,6 @@ pub async fn generate_challenge(
     }
 
     Ok(ServerResponse::ChallengeRequest {
-        device_id: get_device_id().await,
         nonce: nonce_uuid_hash.as_bytes().to_vec(),
     })
 }

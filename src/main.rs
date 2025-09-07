@@ -1,13 +1,15 @@
 use crate::consts::CommonThreadError;
+use crate::keychain::data::set_device_passphrase;
 use crate::menu::display_menu;
 use crate::utils::DirType::Action;
 use crate::utils::{get_client_cert_storage, get_default_application_dir, get_server_cert_storage};
 use lazy_static::lazy_static;
 use log::{error, info};
-use tokio::runtime::Handle;
-use std::fs;
-use std::path::PathBuf;
 use once_cell::sync::OnceCell;
+use std::fs;
+use std::ops::Index;
+use std::path::PathBuf;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -36,27 +38,30 @@ lazy_static! {
 }
 static TOKIO_HANDLE: OnceCell<Handle> = OnceCell::new();
 fn get_handle() -> &'static Handle {
-    TOKIO_HANDLE.get().expect("Tokio runtime handle is not initialized")
+    TOKIO_HANDLE
+        .get()
+        .expect("Tokio runtime handle is not initialized")
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CommonThreadError> {
-    TOKIO_HANDLE.set(Handle::current())
+    TOKIO_HANDLE
+        .set(Handle::current())
         .expect("Failed to set tokio handle");
 
-    construct();
+    construct().await?;
     display_menu();
 
     Ok(())
 }
 
-fn construct() {
+async fn construct() -> Result<(), CommonThreadError> {
     env_logger::init();
+    load_banner();
 
     let args: Vec<String> = std::env::args().collect();
-    let fresh = args.contains(&"--fresh".to_string()) || args.contains(&"-f".to_string());
 
-    if fresh {
+    if args.contains(&"--fresh".to_string()) || args.contains(&"-f".to_string()) {
         let dir = get_client_cert_storage();
         fs::remove_dir_all(dir).expect("Cannot clear client cert DIR");
 
@@ -65,14 +70,28 @@ fn construct() {
         fs::remove_dir_all(get_default_application_dir(Action))
             .expect("Cannot clear application DIR");
     }
-    load_banner();
+
+    if let Some((id, _)) = args
+        .to_vec()
+        .iter()
+        .enumerate()
+        .find(|(_, x)| *x == "--passphrase" || *x == "-p")
+    {
+        set_device_passphrase(args[id + 1].clone()).await?;
+        info!(
+            "Using passphrase: {}{}{}",
+            "\x1B[1;32m",
+            args[id + 1],
+            "\x1B[0m"
+        );
+    }
 
     joins_listener();
+    Ok(())
 }
 
 fn joins_listener() {
     let handle = tokio::spawn(async move {
-
         let mut mtx = JoinsChannel.1.lock().await;
         while let Some(handle) = mtx.recv().await {
             let handle_id = handle.id();
@@ -83,8 +102,7 @@ fn joins_listener() {
         }
     });
 
-    JoinsChannel.0.clone().send(handle)
-        .expect("Cannot send");
+    JoinsChannel.0.clone().send(handle).expect("Cannot send");
 }
 
 fn load_banner() {

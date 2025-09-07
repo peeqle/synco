@@ -252,9 +252,6 @@ async fn consume_frame(
     match current_status {
         Access => {
             match frame {
-                ServerRequest::RejectConnection(_) => {
-                    //todo
-                }
                 ServerRequest::FileRequest(file_id) => {}
                 ServerRequest::SeedingFiles => {
                     response_sender
@@ -314,8 +311,6 @@ async fn consume_frame(
         _ => match frame {
             ServerRequest::InitialRequest { .. } => {}
             ServerRequest::ChallengeResponse { .. } => {}
-            ServerRequest::AcceptConnection(_) => {}
-            ServerRequest::RejectConnection(_) => {}
             _ => {
                 response_sender
                     .send(ServerResponse::Error {

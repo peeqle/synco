@@ -6,7 +6,7 @@ use crate::machine_utils::get_local_ip;
 use crate::utils::{load_cas, validate_server_cert_present};
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ResolvesServerCert, WantsServerCert, WebPkiClientVerifier};
-use rustls::{crypto, ConfigBuilder, ServerConfig};
+use rustls::{ConfigBuilder, ServerConfig, crypto};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,11 +16,9 @@ use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::{default, io};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
-use tokio_rustls::server::TlsStream;
-use tokio_rustls::{client, TlsAcceptor};
+use tokio_rustls::TlsAcceptor;
 use vis::vis;
 
 impl TcpServer {
@@ -77,8 +75,7 @@ impl TcpServer {
     }
 
     pub fn create_signing_server_config() -> ConfigBuilder<ServerConfig, WantsServerCert> {
-        ServerConfig::builder()
-            .with_no_client_auth()
+        ServerConfig::builder().with_no_client_auth()
     }
 }
 
@@ -99,7 +96,8 @@ impl ResolvesServerCert for StaticCertResolver {
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         let certified_key = rustls::sign::CertifiedKey {
             cert: self.certs.clone(),
-            key: crypto::aws_lc_rs::sign::any_supported_type(&self.key).expect("Cannot extract key"),
+            key: crypto::aws_lc_rs::sign::any_supported_type(&self.key)
+                .expect("Cannot extract key"),
             ocsp: None,
         };
         Some(Arc::new(certified_key))
@@ -118,7 +116,7 @@ pub struct TcpServer {
 pub struct ServerTcpPeer {
     device_id: String,
     response_sender: Sender<ServerResponse>,
-    connection_status: RwLock<ConnectionState>
+    connection_status: RwLock<ConnectionState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +124,7 @@ pub enum Crud {
     Create,
     Read,
     Update,
-    Delete
+    Delete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,57 +133,37 @@ pub enum ServerRequest {
         device_id: String,
     },
     ChallengeResponse {
-        iv_bytes: [u8;12],
-        salt: [u8;16],
-        ciphertext_with_tag: Vec<u8>
+        iv_bytes: [u8; 12],
+        salt: [u8; 16],
+        ciphertext_with_tag: Vec<u8>,
     },
-    AcceptConnection(String),
-    RejectConnection(String),
     FileRequest(String),
-    SeedingFiles
+    SeedingFiles,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SigningServerRequest {
     FetchCrt,
-    SignCsr {
-        csr: String
-    },
+    SignCsr { csr: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ServerResponse {
-    ChallengeRequest {
-        device_id: String,
-        nonce: Vec<u8>
-    },
-    SignedCertificate {
-        device_id: String,
-        cert_pem: String,
-    },
-    Certificate {
-        cert: String
-    },
-    SeedingFiles {
-        shared_files: Vec<FileEntityDto>
-    },
-    FileMetadata {
-        file_id: String,
-        size: u64
-    },
-    Error {
-        message: String,
-    },
+    ConnectionStateNotification(ConnectionState),
+    ChallengeRequest { nonce: Vec<u8> },
+    SignedCertificate { device_id: String, cert_pem: String },
+    Certificate { cert: String },
+    SeedingFiles { shared_files: Vec<FileEntityDto> },
+    FileMetadata { file_id: String, size: u64 },
+    Error { message: String },
     //bad arch do not use to send
-    FileRequest {
-        file_id: String
-    },
+    FileRequest { file_id: String },
 }
 
 #[derive(Debug, Clone)]
 pub enum ServerActivity {
-    SendChallenge { device_id: String},
+    SendChallenge { device_id: String },
     VerifiedChallenge { device_id: String },
 }
 

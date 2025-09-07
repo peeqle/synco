@@ -1,9 +1,11 @@
+use crate::consts::data::get_device_id;
 use crate::consts::{
-    CommonThreadError, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME,
-    PRIVATE_KEY_FILE_NAME, SIGNING_KEY,
+    CommonThreadError, CERT_FILE_NAME, LEAF_CERT_NAME, LEAF_KEYS_NAME, PRIVATE_KEY_FILE_NAME,
+    SIGNING_KEY,
 };
 use crate::keychain::data::get_signing_key;
 use crate::keychain::server::generate_root_ca;
+use crate::machine_utils::get_local_ip;
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage, LockExt};
 use der::pem::LineEnding;
@@ -20,15 +22,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Cursor, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::{error, fs, io};
-use crate::consts::data::get_device_id;
-use crate::machine_utils::get_local_ip;
 
 pub mod data {
-    use crate::keychain::load_signing_key_or_create;
+    use crate::{consts::{data::get_device_id, CommonThreadError}, keychain::load_signing_key_or_create};
     use ed25519_dalek::SigningKey;
     use std::sync::Arc;
     use tokio::sync::{Mutex, OnceCell};
 
+    static DEVICE_PASSPHRASE: OnceCell<Vec<u8>> = OnceCell::const_new();
     static DEVICE_SIGNING_KEY: OnceCell<Arc<Mutex<SigningKey>>> = OnceCell::const_new();
     async fn init_signing_key() -> Arc<Mutex<SigningKey>> {
         match load_signing_key_or_create().await {
@@ -43,6 +44,22 @@ pub mod data {
             .get_or_init(|| async { init_signing_key().await })
             .await;
         key.clone()
+    }
+
+    pub async fn set_device_passphrase(pass: String) -> Result<(), CommonThreadError> {
+        DEVICE_PASSPHRASE.set(pass.as_bytes().to_vec())?;
+        Ok(())
+    }
+
+    pub async fn get_device_passphrase() -> Vec<u8> {
+        let pass = DEVICE_PASSPHRASE.get();
+
+        match pass {
+            None => {
+                get_device_id().await.as_bytes().to_vec()
+            }
+            Some(pa) => pa.clone(),
+        }
     }
 }
 
@@ -641,8 +658,7 @@ pub async fn generate_cert_keys() -> Result<(), Box<dyn Error + Sync + Send>> {
     let ca_params = create_root_ca_params()?;
     let ca_cert = ca_params.self_signed(&ca_key_pair)?;
 
-    let mut params =
-        CertificateParams::new(get_default_crt_namespace()?)?;
+    let mut params = CertificateParams::new(get_default_crt_namespace()?)?;
     let mut cert_name = DistinguishedName::new();
 
     cert_name.push(DnType::OrganizationName, get_device_id().await.to_string());
@@ -703,8 +719,6 @@ fn create_root_ca_params() -> Result<CertificateParams, CommonThreadError> {
 }
 
 fn create_leaf_ca_params() -> Result<CertificateParams, CommonThreadError> {
-    use crate::machine_utils::get_local_ip;
-
     let mut ca_params = CertificateParams::new(get_default_crt_namespace()?)?;
     ca_params.distinguished_name = DistinguishedName::new();
     ca_params
