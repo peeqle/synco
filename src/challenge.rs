@@ -291,14 +291,14 @@ async fn verify_challenge(
         {
             //todo think more, but ok for most cases
             let decrypted_hash:Vec<u8> = if let Ok(res) =
-                decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, nonce_hash)
+                decrypt_with_passphrase(&ciphertext_with_tag, &iv_bytes, &salt, passphrase)
             {
                 res
             } else {
                 vec![]
             };
 
-            return if !decrypted_hash.eq(passphrase) {
+            return if !decrypted_hash.eq(nonce_hash) {
                 info!("Client passphrase invalid");
                 *attempts -= 1;
 
