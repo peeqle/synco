@@ -12,7 +12,9 @@ use crate::server::data::get_default_server;
 use crate::server::model::ConnectionState::Unknown;
 use crate::server::model::ServerResponse::{ConnectionStateNotification, FileRequest};
 use crate::server::model::{ConnectionState, ServerRequest, ServerResponse};
-use crate::tcp_utils::{receive_file_chunked, receive_frame, send_file_chunked, send_framed};
+use crate::tcp_utils::{
+    receive_file_chunked, receive_frame, send_file_chunked, send_framed, FILE_CHUNK_SIZE,
+};
 use crate::utils::DirType::Action;
 use crate::utils::{get_default_application_dir, get_server_cert_storage};
 use crate::JoinsChannel;
@@ -32,7 +34,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{io, mem};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::unix::pipe::Sender;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
@@ -480,21 +482,37 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
         let mut state = ReadState::Frame;
         loop {
             tokio::select! {
-                 _ = sh_rx.changed() => {
+                _ = sh_rx.changed() => {
                     debug!("Closing server connection...");
                     break;
                 }
+
                 result = async {
-                    match &state {
-                        ReadState::File{file_id,size} => {
-                            if let Some(existing_file) = get_file(&file_id).await {
-                                if let Ok(file_writer) = get_file_writer(&existing_file).await {
-                                    let _ = receive_file_chunked(&mut read_h,size.clone(),file_writer).await;
+                    match &mut state {
+                        ReadState::File { remaining, writer, .. } => {
+                            let mut buf = vec![0; FILE_CHUNK_SIZE.min(*remaining as usize)];
+                            match read_h.read(&mut buf).await {
+                                Ok(0) => {
+                                    return Some(Err(io::Error::new(
+                                        ErrorKind::UnexpectedEof,
+                                        "connection closed during file transfer"
+                                    ).into()));
                                 }
+                                Ok(n) => {
+                                    writer.write_all(&buf[..n]).await
+                                    .expect("Cannot write to buffer");
+                                    *remaining -= n as u64;
+                                    if *remaining == 0 {
+                                        writer.flush().await
+                                            .expect("Cannot flush");
+                                        state = ReadState::Frame;
+                                    }
+                                }
+                                Err(e) => return Some(Err(e.into())),
                             }
-                            state = ReadState::Frame;
                             None
                         }
+
                         ReadState::Frame => {
                             let frame = receive_frame::<_, ServerResponse>(&mut read_h).await;
                             Some(frame)
@@ -503,15 +521,26 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
                 } => {
                     if let Some(Ok(request)) = result {
                         match request {
-                            ServerResponse::FileMetadata {file_id,size} => {
-                                state = ReadState::File{file_id, size};
+                            ServerResponse::FileMetadata { file_id, size } => {
+                                if let Some(existing_file) = get_file(&file_id).await {
+                                    if let Ok(file_writer) = get_file_writer(&existing_file).await {
+                                        state = ReadState::File {
+                                            file_id,
+                                            remaining: size,
+                                            writer: file_writer,
+                                        };
+                                    }
+                                }
                             }
                             ServerResponse::ChallengeRequest { nonce } => {
-                                    challenge_manager
-                                        .get_sender()
-                                        .send(NewChallengeRequest { device_id: device_id.clone(), nonce })
-                                        .await
-                                        .expect("Cannot send");
+                                challenge_manager
+                                    .get_sender()
+                                    .send(NewChallengeRequest {
+                                        device_id: device_id.clone(),
+                                        nonce,
+                                    })
+                                    .await
+                                    .expect("Cannot send");
                             }
                             ServerResponse::SeedingFiles { shared_files } => {
                                 for file_data in shared_files {
@@ -523,11 +552,14 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
                                 let cp = DefaultChallengeManager.clone();
                                 cp.remove_incoming_challenge(&device_id).await;
                             }
-                            ServerResponse::Error {message  } => {
+                            ServerResponse::Error { message } => {
                                 error!("Server returned error: {}", message)
                             }
                             _ => {}
                         }
+                    } else if let Some(Err(e)) = result {
+                        error!("Error while reading: {}", e);
+                        break;
                     }
                 }
             }
@@ -543,5 +575,9 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
 enum ReadState {
     Frame,
-    File { file_id: String, size: u64 },
+    File {
+        file_id: String,
+        remaining: u64,
+        writer: BufWriter<tokio::fs::File>,
+    },
 }
