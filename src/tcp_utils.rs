@@ -61,6 +61,8 @@ where
         .await?;
     connection.write_all(&serialized_metadata).await?;
 
+    connection.flush().await?;
+
     let mut buffer_chunk = [0u8; FILE_CHUNK_SIZE];
 
     loop {

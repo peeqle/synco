@@ -9,7 +9,7 @@ use crate::keychain::server::load::load_server_crt_pem;
 use crate::keychain::server::sign_client_csr;
 use crate::server::data::{get_default_server, get_server_peer};
 use crate::server::model::ConnectionState::{Access, Denied, Pending, Unknown};
-use crate::server::model::ServerResponse::FileRequest;
+use crate::server::model::ServerResponse::{FileMetadata, FileRequest};
 use crate::server::model::{
     Crud, ServerActivity, ServerRequest, ServerResponse, ServerTcpPeer, SigningServerRequest,
     TcpServer,
@@ -250,27 +250,30 @@ async fn consume_frame(
     device_id: String,
 ) {
     match current_status {
-        Access => {
-            match frame {
-                ServerRequest::FileRequest(file_id) => {}
-                ServerRequest::SeedingFiles => {
-                    response_sender
-                        .send(ServerResponse::SeedingFiles {
-                            shared_files: get_seeding_files().await,
-                        })
-                        .await
-                        .expect("Cannot send");
-                }
-                _ => {
-                    response_sender
-                        .send(ServerResponse::Error {
-                            message: "Connection already established".to_string(),
-                        })
-                        .await
-                        .expect("Cannot send");
-                }
+        Access => match frame {
+            ServerRequest::FileRequest(file_id) => {
+                response_sender
+                    .send(FileRequest { file_id })
+                    .await
+                    .expect("Cannot send");
             }
-        }
+            ServerRequest::SeedingFiles => {
+                response_sender
+                    .send(ServerResponse::SeedingFiles {
+                        shared_files: get_seeding_files().await,
+                    })
+                    .await
+                    .expect("Cannot send");
+            }
+            _ => {
+                response_sender
+                    .send(ServerResponse::Error {
+                        message: "Connection already established".to_string(),
+                    })
+                    .await
+                    .expect("Cannot send");
+            }
+        },
         Denied => {
             response_sender
                 .send(ServerResponse::Error {
