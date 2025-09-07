@@ -180,13 +180,11 @@ impl Step for CollectSharingFilesData {
                         let conn_mtx = connection_arc.lock().await;
 
                         if let Some(connection) = conn_mtx.as_ref() {
-                            if matches!(connection.connection_status, ConnectionState::Access) {
-                                let _ = connection
-                                    .request_sender
-                                    .clone()
-                                    .send(ServerRequest::SeedingFiles)
-                                    .await;
-                            }
+                            let _ = connection
+                                .request_sender
+                                .clone()
+                                .send(ServerRequest::SeedingFiles)
+                                .await;
                         }
                     }
                 }
