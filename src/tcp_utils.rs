@@ -68,9 +68,11 @@ where
     loop {
         let bytes_read = file.read(&mut buffer_chunk)?;
         if bytes_read == 0 {
+            debug!("File read end");
             break;
         }
 
+        debug!("Sending file bytes");
         connection
             .write_all(&(bytes_read as u64).to_le_bytes())
             .await?;

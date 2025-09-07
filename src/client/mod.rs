@@ -477,52 +477,58 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
     let device_id = device.device_id.clone();
     let read_task = tokio::spawn(async move {
         let challenge_manager = DefaultChallengeManager.clone();
+        let mut state = ReadState::Frame;
         loop {
             tokio::select! {
-                req = receive_frame::<_, ServerResponse>(&mut read_h) => {
-                     match req {
-                        Ok(request) => {
-                            println!("Got request: {:?}", request);
-                            match request {
-                                ServerResponse::ChallengeRequest { nonce } => {
+                 _ = sh_rx.changed() => {
+                    debug!("Closing server connection...");
+                    break;
+                }
+                result = async {
+                    match &state {
+                        ReadState::File{file_id,size} => {
+                            if let Some(existing_file) = get_file(&file_id).await {
+                                if let Ok(file_writer) = get_file_writer(&existing_file).await {
+                                    let _ = receive_file_chunked(&mut read_h,size.clone(),file_writer).await;
+                                }
+                            }
+                            state = ReadState::Frame;
+                            None
+                        }
+                        ReadState::Frame => {
+                            let frame = receive_frame::<_, ServerResponse>(&mut read_h).await;
+                            Some(frame)
+                        }
+                    }
+                } => {
+                    if let Some(Ok(request)) = result {
+                        match request {
+                            ServerResponse::FileMetadata {file_id,size} => {
+                                state = ReadState::File{file_id, size};
+                            }
+                            ServerResponse::ChallengeRequest { nonce } => {
                                     challenge_manager
                                         .get_sender()
                                         .send(NewChallengeRequest { device_id: device_id.clone(), nonce })
                                         .await
                                         .expect("Cannot send");
-                                }
-                                ServerResponse::SeedingFiles { shared_files } => {
-                                    for file_data in shared_files {
-                                        append(file_data).await;
-                                    }
-                                }
-                                ServerResponse::FileMetadata { file_id, size } => {
-                                    if let Some(existing_file) = get_file(&file_id).await {
-                                        if let Ok(file_writer) = get_file_writer(&existing_file).await {
-                                            let _ = receive_file_chunked(&mut read_h,size,file_writer).await;
-                                        }
-                                    }
-                                }
-                                ServerResponse::ConnectionStateNotification(state) => {
-                                    info!("Connection update on server, state: {:?}", state);
-                                    let cp = DefaultChallengeManager.clone();
-                                    cp.remove_incoming_challenge(&device_id).await;
-                                }
-                                ServerResponse::Error {message  } => {
-                                    error!("Server returned error: {}", message)
-                                }
-                                _ => {}
                             }
-                        }
-                        Err(e) => {
-                            error!("Error: {}", e);
-                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            ServerResponse::SeedingFiles { shared_files } => {
+                                for file_data in shared_files {
+                                    append(file_data).await;
+                                }
+                            }
+                            ServerResponse::ConnectionStateNotification(state) => {
+                                info!("Connection update on server, state: {:?}", state);
+                                let cp = DefaultChallengeManager.clone();
+                                cp.remove_incoming_challenge(&device_id).await;
+                            }
+                            ServerResponse::Error {message  } => {
+                                error!("Server returned error: {}", message)
+                            }
+                            _ => {}
                         }
                     }
-                }
-                _ = sh_rx.changed() => {
-                    debug!("Closing server connection...");
-                    break;
                 }
             }
         }
@@ -533,4 +539,9 @@ async fn open_connection(server_id: String) -> Result<(), CommonThreadError> {
 
     info!("Connection setup completed for: {}", server_id);
     Ok(())
+}
+
+enum ReadState {
+    Frame,
+    File { file_id: String, size: u64 },
 }
