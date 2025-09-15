@@ -7,7 +7,7 @@ pub fn get_local_ip() -> Option<IpAddr> {
 
     if let Some((_, ipaddr)) = ifas
         .iter()
-        .find(|(name, ipaddr)| (*name).contains("wlp") && matches!(ipaddr, IpAddr::V4(_)))
+        .find(|(name, ipaddr)| ((*name).contains("wlp") || (*name).contains("enp")) && matches!(ipaddr, IpAddr::V4(_)))
     {
         info!("Using current device WLP address: {:?}", ipaddr);
         return Some(*ipaddr);

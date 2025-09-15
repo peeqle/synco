@@ -13,7 +13,7 @@ use crate::utils::encrypt_with_passphrase;
 use crate::{broadcast, challenge, client, get_handle, menu_step, server, JoinsChannel};
 use ::futures::executor;
 use lazy_static::lazy_static;
-use log::{error, info};
+use log::{error, info, warn};
 use std::collections::{HashMap, LinkedList};
 use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
@@ -22,6 +22,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot::{self, channel};
 use tokio::task;
 use tokio::task::spawn_blocking;
+use crate::configuration::load_configuration;
 
 //todo future me create logic for handling runner state
 // from the handlers to menu components state via global ?state machine?
@@ -122,17 +123,11 @@ impl Step for StartBroadcastStep {
         }
 
         get_handle().spawn(async {
-            let net_addr = initialize().await;
-
             let device_manager_arc = Arc::clone(&DefaultDeviceManager);
             let challenge_manager = Arc::clone(&DefaultChallengeManager);
 
             let handle = tokio::spawn(async move {
-                tokio::spawn(broadcast::start_broadcast_announcer(
-                    DEFAULT_LISTENING_PORT,
-                    net_addr,
-                ));
-                tokio::spawn(broadcast::start_listener());
+                tokio::spawn(broadcast::start_broadcasting());
                 tokio::spawn(async move { device_manager_arc.start().await });
                 tokio::spawn(async move { challenge::run(challenge_manager.clone()).await });
             });
@@ -476,15 +471,4 @@ impl Step for CompleteChallenge {
     fn display(&self) -> &str {
         "Complete selected server challenge"
     }
-}
-
-async fn initialize() -> IpAddr {
-    let local_ip = get_local_ip().expect("Could not determine local IP address");
-
-    info!("Device ID: {}", &get_device_id().await[..]);
-    info!("Listening Port: {}", DEFAULT_LISTENING_PORT);
-    info!("Local IP: {}", local_ip);
-
-    generate_root_ca().expect("Cannot generate CA");
-    local_ip
 }

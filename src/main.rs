@@ -13,6 +13,9 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use crate::configuration::load_configuration;
+use crate::keychain::server::generate_root_ca;
+use crate::machine_utils::get_local_ip;
 
 mod broadcast;
 mod challenge;
@@ -26,6 +29,7 @@ mod menu;
 mod server;
 mod tcp_utils;
 mod utils;
+mod configuration;
 
 lazy_static! {
     pub static ref JoinsChannel: (
@@ -85,6 +89,12 @@ async fn construct() -> Result<(), CommonThreadError> {
             "\x1B[0m"
         );
     }
+
+    {
+        load_configuration();
+        generate_root_ca().expect("Cannot generate CA");
+    }
+
 
     joins_listener();
     Ok(())

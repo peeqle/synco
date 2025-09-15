@@ -1,7 +1,4 @@
-use crate::consts::{
-    DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_FILES_SUBDIR,
-    DEFAULT_SERVER_CERT_STORAGE,
-};
+use crate::consts::{CommonThreadError, CONFIGURATION_FILE_NAME, DEFAULT_APP_SUBDIR, DEFAULT_CLIENT_CERT_STORAGE, DEFAULT_CONFIG_SUBDIR, DEFAULT_FILES_SUBDIR, DEFAULT_SERVER_CERT_STORAGE};
 use crate::keychain::data::get_signing_key;
 use crate::utils::DirType::Action;
 use aes_gcm::aead::rand_core::RngCore;
@@ -75,6 +72,30 @@ pub fn get_files_dir() -> PathBuf {
 
     application_dir
 }
+
+pub fn get_config_dir() -> PathBuf {
+    let mut application_dir = get_default_application_dir(Action);
+    application_dir.push(DEFAULT_CONFIG_SUBDIR);
+
+    fs::create_dir_all(&application_dir).expect(&format!(
+        "Cannot create dirs at {}",
+        application_dir.to_str().unwrap_or("unknown")
+    ));
+
+    application_dir
+}
+
+pub fn get_main_config_file() -> Result<File, CommonThreadError> {
+    let config_dir = get_config_dir();
+    let file_path = config_dir.join(&CONFIGURATION_FILE_NAME);
+
+    if !file_path.exists() {
+        return Ok(File::create_new(file_path)?);
+    }
+    
+    Ok(File::open(file_path)?)
+}
+
 pub fn get_default_application_dir(dir_type: DirType) -> PathBuf {
     let mut app_data_dir = match dir_type {
         DirType::Action => dirs::data_dir(),
